@@ -52,32 +52,17 @@ jobs:
           test -e drivers/kernelsu/Kconfig
           ls KernelSU/kernel | head
 
-      - name: Integrate SuSFS v2.3.0
-        run: |
-          set -euxo pipefail
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 ws/susfs
-          git -C ws/susfs checkout 2d11d711de80f0f749b3055f8da8f7b9682454e4
-          grep -m1 SUSFS_VERSION ws/susfs/kernel_patches/include/linux/susfs.h
-          cp ws/susfs/kernel_patches/fs/susfs.c ws/common/fs/
-          cp ws/susfs/kernel_patches/include/linux/susfs.h ws/susfs/kernel_patches/include/linux/susfs_def.h ws/common/include/linux/
-          cd ws/common
-          patch -p1 < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
-          cd KernelSU
-          patch -p1 < ../../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
-
       - name: Configure (device config + KSU + SuSFS)
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
           cp "${{ github.workspace }}/device.config" .config
-          printf "CONFIG_KSU=y\nCONFIG_KSU_SUSFS=y\n" >> .config
+          printf "CONFIG_KSU=y\n" >> .config
           sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' .config
           sed -i 's/^CONFIG_LOCALVERSION="-4k"/CONFIG_LOCALVERSION="-4k-g48baf0c723f8"/' .config
           make ARCH=arm64 LLVM=1 olddefconfig
           grep -E "^CONFIG_KSU=y" .config
-          grep -E "^CONFIG_KSU_SUSFS=y" .config
-          echo "SUSFS options enabled: $(grep -c '^CONFIG_KSU_SUSFS.*=y' .config)"
           echo "kernelrelease: $(make -s ARCH=arm64 LLVM=1 kernelrelease)"
 
       - name: Build kernel Image
