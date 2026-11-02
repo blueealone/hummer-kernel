@@ -48,7 +48,7 @@ jobs:
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash - 0faec0cc7b5f655170d89bf9c4d28bb5ca271fa2
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s 0faec0cc7b5f655170d89bf9c4d28bb5ca271fa2
           test -e drivers/kernelsu/Kconfig
           ls KernelSU/kernel | head
 
