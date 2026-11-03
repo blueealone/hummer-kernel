@@ -1,8 +1,7 @@
 name: build-hummer-susfs-kernel
 
 # Manual trigger only. Builds the crDroid 17.0 kernel for hummer (PKR110)
-# from the exact source commit of the running stock crDroid kernel,
-# with KernelSU (built-in, tag v3.3.1) and SuSFS v2.3.0 integrated.
+# with SukiSU-Ultra v4.3.0 (built-in, KPM + preinit) integrated.
 
 on:
   workflow_dispatch:
@@ -44,26 +43,39 @@ jobs:
           git clone https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-devicetrees -b 17.0 ws/sm8750-devicetrees
           head -4 ws/common/Makefile
 
-      - name: Integrate KernelSU v3.3.1 (built-in)
+      - name: Integrate SukiSU-Ultra v4.3.0 (built-in)
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s 0faec0cc7b5f655170d89bf9c4d28bb5ca271fa2
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s v4.3.0
           test -e drivers/kernelsu/Kconfig
           ls KernelSU/kernel | head
+          echo "=== Kconfig 里的 KPM / preinit ==="
+          grep -E "^(config KPM|config KSU)$" KernelSU/kernel/Kconfig || true
 
-      - name: Configure (device config + KSU + SuSFS)
+      - name: Configure (device config + KSU + KPM)
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
           cp "${{ github.workspace }}/device.config" .config
-          printf "CONFIG_KSU=y\n" >> .config
+          printf "CONFIG_KSU=y\nCONFIG_KPM=y\n" >> .config
           sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' .config
           sed -i 's/^CONFIG_LOCALVERSION="-4k"/CONFIG_LOCALVERSION="-4k-g48baf0c723f8"/' .config
           make ARCH=arm64 LLVM=1 olddefconfig
+          echo "=== verify ==="
           grep -E "^CONFIG_KSU=y" .config
+          grep -E "^CONFIG_KPM=y" .config || echo "WARN: KPM not set"
+          grep -E "^CONFIG_HEADERS_INSTALL=y" .config || echo "WARN: HEADERS_INSTALL not set"
           echo "kernelrelease: $(make -s ARCH=arm64 LLVM=1 kernelrelease)"
+
+      - name: Headers install (required for preinit runner)
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+          export PATH="$HOME/llvm/bin:$PATH"
+          make ARCH=arm64 LLVM=1 headers_install
+          ls -l usr/include/linux/unistd.h && echo "=== UAPI headers OK, preinit enabled ==="
 
       - name: Build kernel Image
         working-directory: ${{ github.workspace }}/ws/common
@@ -72,8 +84,12 @@ jobs:
           export PATH="$HOME/llvm/bin:$PATH"
           make ARCH=arm64 LLVM=1 -j"$(nproc)" Image
           ls -lh arch/arm64/boot/Image
+          echo "=== Linux version ==="
           strings arch/arm64/boot/Image | grep -m1 "Linux version"
-          strings arch/arm64/boot/Image | grep -im2 "susfs" || true
+          echo "=== KPM 字符串计数 ==="
+          strings arch/arm64/boot/Image | grep -ci "kpm" || true
+          echo "=== preinit 字符串计数 ==="
+          strings arch/arm64/boot/Image | grep -ci "preinit" || true
 
       - name: Package AnyKernel3 zip
         run: |
@@ -89,12 +105,12 @@ jobs:
           sed -i 's|^BLOCK=.*|BLOCK=/dev/block/by-name/boot;|' anykernel.sh
           sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' anykernel.sh
           rm -rf .git
-          zip -r9 "${{ github.workspace }}/AK3-hummer-crdroid17-ksu-susfs.zip" .
-          ls -lh "${{ github.workspace }}/AK3-hummer-crdroid17-ksu-susfs.zip"
+          zip -r9 "${{ github.workspace }}/AK3-hummer-crdroid17-sukisu.zip" .
+          ls -lh "${{ github.workspace }}/AK3-hummer-crdroid17-sukisu.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: AK3-hummer-kernel
-          path: AK3-hummer-crdroid17-ksu-susfs.zip
+          path: AK3-hummer-crdroid17-sukisu.zip
           if-no-files-found: error
