@@ -40,7 +40,6 @@ jobs:
           git clone https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-devicetrees -b 17.0 ws/sm8750-devicetrees
           head -4 ws/common/Makefile
 
-      # ========== 1. 先做内核侧 SuSFS 集成（必须在 SukiSU 之前）==========
       - name: Integrate SuSFS kernel patch
         run: |
           set -euxo pipefail
@@ -49,19 +48,14 @@ jobs:
           grep -m1 SUSFS_VERSION ws/susfs/kernel_patches/include/linux/susfs.h
 
           cd ws/common
-
-          # 复制内核侧源码
           cp ../susfs/kernel_patches/fs/susfs.c fs/
           cp ../susfs/kernel_patches/include/linux/susfs.h \
              ../susfs/kernel_patches/include/linux/susfs_def.h include/linux/
-          echo "=== 确认头文件就位 ==="
-          ls -l include/linux/susfs.h include/linux/susfs_def.h fs/susfs.c
+          ls -l include/linux/susfs.h fs/susfs.c
 
-          # 打内核侧 patch
           echo "=== 应用 patch ==="
           patch -p1 --forward < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
 
-          echo "=== 检查 .rej ==="
           if find . -name "*.rej" | head -1 | grep -q .; then
             echo "=== 被拒绝的 hunk ==="
             find . -name "*.rej" -exec sh -c 'echo "--- {}"; head -30 {}' \;
@@ -69,7 +63,6 @@ jobs:
           fi
           echo "=== SuSFS 内核 patch 完成 ==="
 
-      # ========== 2. 再集成 SukiSU builtin 分支 ==========
       - name: Integrate SukiSU builtin branch
         working-directory: ${{ github.workspace }}/ws/common
         run: |
@@ -79,9 +72,46 @@ jobs:
           echo "=== HEAD ==="
           git rev-parse HEAD
           echo "=== Kconfig 项 ==="
-          grep -E "^config (KSU|KPM|KSU_SUSFS)$" kernel/Kconfig
-          echo "=== 确认 susfs.h 可被找到 ==="
-          test -f ../include/linux/susfs.h && echo "OK: 内核侧 susfs.h 存在"
+          grep -E "^config (KSU|KPM|KSU_SUSFS)" kernel/Kconfig | head -20
+
+      # ========== 关键修复：补齐缺失的 Kconfig 项 ==========
+      - name: Patch SukiSU Kconfig for PRIORITY_UID_FILTER
+        working-directory: ${{ github.workspace }}/ws/common/KernelSU
+        run: |
+          set -euxo pipefail
+          KCONFIG=kernel/Kconfig
+
+          echo "=== 检查是否已有 PRIORITY_UID_FILTER ==="
+          if grep -q "KSU_SUSFS_PRIORITY_UID_FILTER" "$KCONFIG"; then
+            echo "已存在，跳过"
+            exit 0
+          fi
+
+          echo "=== 插入 CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER 定义 ==="
+          # 在 KernelSU - SUSFS menu 的 endmenu 之前插入
+          # 找到 "menu \"KernelSU - SUSFS\"" 之后第一个 endmenu
+          awk '
+            /^menu "KernelSU - SUSFS"/ { inmenu=1 }
+            inmenu && /^endmenu/ && !done {
+              print "config KSU_SUSFS_PRIORITY_UID_FILTER"
+              print "    bool \"Enable priority uid filter\""
+              print "    depends on KSU_SUSFS"
+              print "    default y"
+              print "    help"
+              print "        Allow adding uid to priority filter list via pkg_observer strings."
+              print "        Required by SukiSU builtin branch (susfs_parse_priority_app_strings)."
+              print ""
+              done=1
+            }
+            { print }
+          ' "$KCONFIG" > "$KCONFIG.new"
+          mv "$KCONFIG.new" "$KCONFIG"
+
+          echo "=== 验证插入结果 ==="
+          grep -A6 "config KSU_SUSFS_PRIORITY_UID_FILTER" "$KCONFIG"
+          echo "=== 确认 endmenu 结构完整 ==="
+          grep -c "^menu" "$KCONFIG"
+          grep -c "^endmenu" "$KCONFIG"
 
       - name: Configure
         working-directory: ${{ github.workspace }}/ws/common
@@ -89,14 +119,14 @@ jobs:
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
           cp "${{ github.workspace }}/device.config" .config
-          printf "CONFIG_KSU=y\nCONFIG_KPM=y\nCONFIG_KSU_SUSFS=y\n" >> .config
+          printf "CONFIG_KSU=y\nCONFIG_KPM=y\nCONFIG_KSU_SUSFS=y\nCONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y\n" >> .config
           sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' .config
           sed -i 's/^CONFIG_LOCALVERSION="-4k"/CONFIG_LOCALVERSION="-4k-g48baf0c723f8"/' .config
           make ARCH=arm64 LLVM=1 olddefconfig
 
           echo "=== 配置验证 ==="
-          for c in CONFIG_KSU CONFIG_KPM CONFIG_KSU_SUSFS CONFIG_KALLSYMS_ALL \
-                   CONFIG_KPROBES CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL CONFIG_MODULES; do
+          for c in CONFIG_KSU CONFIG_KPM CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER \
+                   CONFIG_KALLSYMS_ALL CONFIG_KPROBES CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL CONFIG_MODULES; do
             if grep -q "^${c}=y" .config; then
               echo "OK   $c"
             else
@@ -105,7 +135,7 @@ jobs:
               exit 1
             fi
           done
-          echo "=== SuSFS 子项 ==="
+          echo "=== SuSFS 子项数 ==="
           grep -c "^CONFIG_KSU_SUSFS.*=y" .config
           echo "kernelrelease: $(make -s ARCH=arm64 LLVM=1 kernelrelease)"
 
@@ -122,7 +152,6 @@ jobs:
         run: |
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
-          # 不用 tail 缓冲，实时输出
           make ARCH=arm64 LLVM=1 -j"$(nproc)" Image
           test -f arch/arm64/boot/Image
           ls -lh arch/arm64/boot/Image
@@ -141,7 +170,11 @@ jobs:
           echo "suSFS 字符串:   $SUS_N"
           echo "KPM 字符串:     $KPM_N"
           echo "preinit 字符串: $PRE_N"
-          echo "=== 编译产物 ==="
+          echo "=== 关键函数符号 ==="
+          for s in susfs_parse_priority_app_strings susfs_set_priority_uid_filter susfs_add_sus_path; do
+            strings $IMG | grep -qx "$s" && echo "OK   $s" || echo "MISS $s"
+          done
+          echo "=== 产物 ==="
           for o in fs/susfs.o drivers/kernelsu/ksu.o drivers/kernelsu/preinit/preinit.o; do
             [ -f "$o" ] && echo "OK   $o" || echo "MISS $o"
           done
