@@ -1,4 +1,4 @@
-name: build-hummer-sukisu-builtin
+name: build-hummer-sukisu-builtin-susfs
 
 on:
   workflow_dispatch:
@@ -40,23 +40,48 @@ jobs:
           git clone https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-devicetrees -b 17.0 ws/sm8750-devicetrees
           head -4 ws/common/Makefile
 
+      # ========== 1. 先做内核侧 SuSFS 集成（必须在 SukiSU 之前）==========
+      - name: Integrate SuSFS kernel patch
+        run: |
+          set -euxo pipefail
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 ws/susfs
+          echo "=== SUSFS 版本 ==="
+          grep -m1 SUSFS_VERSION ws/susfs/kernel_patches/include/linux/susfs.h
+
+          cd ws/common
+
+          # 复制内核侧源码
+          cp ../susfs/kernel_patches/fs/susfs.c fs/
+          cp ../susfs/kernel_patches/include/linux/susfs.h \
+             ../susfs/kernel_patches/include/linux/susfs_def.h include/linux/
+          echo "=== 确认头文件就位 ==="
+          ls -l include/linux/susfs.h include/linux/susfs_def.h fs/susfs.c
+
+          # 打内核侧 patch
+          echo "=== 应用 patch ==="
+          patch -p1 --forward < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
+
+          echo "=== 检查 .rej ==="
+          if find . -name "*.rej" | head -1 | grep -q .; then
+            echo "=== 被拒绝的 hunk ==="
+            find . -name "*.rej" -exec sh -c 'echo "--- {}"; head -30 {}' \;
+            exit 1
+          fi
+          echo "=== SuSFS 内核 patch 完成 ==="
+
+      # ========== 2. 再集成 SukiSU builtin 分支 ==========
       - name: Integrate SukiSU builtin branch
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s 1cfa57340590971cba7521ed536da8ebbedc5f0a
-          echo "=== 源码状态 ==="
           cd KernelSU
+          echo "=== HEAD ==="
           git rev-parse HEAD
-          git branch --show-current || echo "(detached)"
-          echo "=== Kconfig 关键项 ==="
+          echo "=== Kconfig 项 ==="
           grep -E "^config (KSU|KPM|KSU_SUSFS)$" kernel/Kconfig
-          echo "=== 目录结构 ==="
-          ls kernel/ | head -20
-          echo "=== preinit ==="
-          test -d kernel/preinit && echo "OK: preinit 存在"
-          echo "=== 检查 susfs 源码 ==="
-          find kernel -name "*susfs*" | head -10
+          echo "=== 确认 susfs.h 可被找到 ==="
+          test -f ../include/linux/susfs.h && echo "OK: 内核侧 susfs.h 存在"
 
       - name: Configure
         working-directory: ${{ github.workspace }}/ws/common
@@ -80,9 +105,8 @@ jobs:
               exit 1
             fi
           done
-          echo "=== SuSFS 子项数量 ==="
+          echo "=== SuSFS 子项 ==="
           grep -c "^CONFIG_KSU_SUSFS.*=y" .config
-          grep -E "^CONFIG_LOCALVERSION" .config
           echo "kernelrelease: $(make -s ARCH=arm64 LLVM=1 kernelrelease)"
 
       - name: Headers install
@@ -91,14 +115,15 @@ jobs:
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
           make ARCH=arm64 LLVM=1 headers_install
-          test -f usr/include/linux/unistd.h && echo "OK: UAPI headers (preinit enabled)"
+          test -f usr/include/linux/unistd.h && echo "OK: UAPI headers"
 
       - name: Build kernel Image
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
-          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image 2>&1 | tail -40
+          # 不用 tail 缓冲，实时输出
+          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image
           test -f arch/arm64/boot/Image
           ls -lh arch/arm64/boot/Image
 
@@ -117,7 +142,7 @@ jobs:
           echo "KPM 字符串:     $KPM_N"
           echo "preinit 字符串: $PRE_N"
           echo "=== 编译产物 ==="
-          for o in drivers/kernelsu/ksu.o drivers/kernelsu/preinit/preinit.o drivers/kernelsu/preinit/blob.o; do
+          for o in fs/susfs.o drivers/kernelsu/ksu.o drivers/kernelsu/preinit/preinit.o; do
             [ -f "$o" ] && echo "OK   $o" || echo "MISS $o"
           done
           echo "=== 结论 ==="
@@ -139,13 +164,13 @@ jobs:
           sed -i 's|^BLOCK=.*|BLOCK=/dev/block/by-name/boot;|' anykernel.sh
           sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' anykernel.sh
           rm -rf .git
-          zip -r9 "${{ github.workspace }}/AK3-hummer-sukisu-builtin.zip" .
-          ls -lh "${{ github.workspace }}/AK3-hummer-sukisu-builtin.zip"
+          zip -r9 "${{ github.workspace }}/AK3-hummer-builtin-susfs.zip" .
+          ls -lh "${{ github.workspace }}/AK3-hummer-builtin-susfs.zip"
 
       - name: Upload
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: AK3-hummer-kernel
-          path: AK3-hummer-sukisu-builtin.zip
+          path: AK3-hummer-builtin-susfs.zip
           if-no-files-found: warn
