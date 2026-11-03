@@ -1,8 +1,5 @@
 name: build-hummer-susfs-kernel
 
-# Manual trigger only. Builds the crDroid 17.0 kernel for hummer (PKR110)
-# with SukiSU-Ultra v4.3.0 (built-in, KPM + preinit) integrated.
-
 on:
   workflow_dispatch:
 
@@ -50,46 +47,93 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s v4.3.0
           test -e drivers/kernelsu/Kconfig
           ls KernelSU/kernel | head
-          echo "=== Kconfig 里的 KPM / preinit ==="
-          grep -E "^(config KPM|config KSU)$" KernelSU/kernel/Kconfig || true
+          echo "=== 确认 SukiSU 自带 susfs 适配层 ==="
+          test -f KernelSU/kernel/extension/susfs_extension.c && echo "OK: susfs_extension.c" || { echo "FATAL"; exit 1; }
 
-      - name: Configure (device config + KSU + KPM)
+      - name: Integrate SuSFS v2.3.0 (kernel side only)
+        run: |
+          set -euxo pipefail
+          # 用分支最新（v2.3.0），不再固定旧 commit
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 ws/susfs
+          echo "=== SUSFS 版本 ==="
+          grep -m1 SUSFS_VERSION ws/susfs/kernel_patches/include/linux/susfs.h
+
+          # 内核侧源码
+          cp ws/susfs/kernel_patches/fs/susfs.c ws/common/fs/
+          cp ws/susfs/kernel_patches/include/linux/susfs.h \
+             ws/susfs/kernel_patches/include/linux/susfs_def.h ws/common/include/linux/
+
+          # 内核侧 patch
+          cd ws/common
+          patch -p1 --forward < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
+
+          echo "=== 检查残留 .rej ==="
+          if find . -name "*.rej" | head -1 | grep -q .; then
+            echo "=== 被拒绝的 hunk ==="
+            find . -name "*.rej" -exec sh -c 'echo "--- {}"; cat {}' \;
+            exit 1
+          fi
+          echo "=== SuSFS 内核 patch 完成 ==="
+
+      - name: Configure (device config + KSU + KPM + SuSFS)
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
           cp "${{ github.workspace }}/device.config" .config
-          printf "CONFIG_KSU=y\nCONFIG_KPM=y\n" >> .config
+          printf "CONFIG_KSU=y\nCONFIG_KPM=y\nCONFIG_KSU_SUSFS=y\n" >> .config
           sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' .config
           sed -i 's/^CONFIG_LOCALVERSION="-4k"/CONFIG_LOCALVERSION="-4k-g48baf0c723f8"/' .config
           make ARCH=arm64 LLVM=1 olddefconfig
-          echo "=== verify ==="
-          grep -E "^CONFIG_KSU=y" .config
-          grep -E "^CONFIG_KPM=y" .config || echo "WARN: KPM not set"
-          grep -E "^CONFIG_HEADERS_INSTALL=y" .config || echo "WARN: HEADERS_INSTALL not set"
+
+          echo "=== 配置验证 ==="
+          for c in CONFIG_KSU CONFIG_KPM CONFIG_KSU_SUSFS CONFIG_KALLSYMS_ALL \
+                   CONFIG_KPROBES CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL; do
+            grep -q "^${c}=y" .config && echo "OK   $c" || { echo "FATAL $c"; exit 1; }
+          done
+          echo "=== SuSFS 子项 ==="
+          grep -c "^CONFIG_KSU_SUSFS.*=y" .config
           echo "kernelrelease: $(make -s ARCH=arm64 LLVM=1 kernelrelease)"
 
-      - name: Headers install (required for preinit runner)
+      - name: Headers install (preinit dependency)
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
           make ARCH=arm64 LLVM=1 headers_install
-          ls -l usr/include/linux/unistd.h && echo "=== UAPI headers OK, preinit enabled ==="
+          test -f usr/include/linux/unistd.h && echo "OK: UAPI headers"
 
       - name: Build kernel Image
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
-          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image
+          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image 2>&1 | tail -50
+          test -f arch/arm64/boot/Image
           ls -lh arch/arm64/boot/Image
+
+      - name: Verify all features
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+          IMG=arch/arm64/boot/Image
           echo "=== Linux version ==="
-          strings arch/arm64/boot/Image | grep -m1 "Linux version"
-          echo "=== KPM 字符串计数 ==="
-          strings arch/arm64/boot/Image | grep -ci "kpm" || true
-          echo "=== preinit 字符串计数 ==="
-          strings arch/arm64/boot/Image | grep -ci "preinit" || true
+          strings $IMG | grep -m1 "Linux version"
+          echo "=== 功能统计 ==="
+          KPM_N=$(strings $IMG | grep -ci kpm)
+          PRE_N=$(strings $IMG | grep -ci preinit)
+          SUS_N=$(strings $IMG | grep -ci susfs)
+          echo "KPM 字符串:     $KPM_N"
+          echo "preinit 字符串: $PRE_N"
+          echo "suSFS 字符串:   $SUS_N"
+          echo "=== 目标文件 ==="
+          for o in fs/susfs.o extension/kpm/kpm.o extension/kpm/compact.o extension/kpm/super_access.o preinit/preinit.o preinit/blob.o; do
+            [ -f "$o" ] && echo "OK   $o" || echo "MISS $o"
+          done
+          echo "=== 结论 ==="
+          [ "$SUS_N" -gt 5 ] && echo "✅ SuSFS 已编入" || { echo "❌ SuSFS 未编入"; exit 1; }
+          [ "$KPM_N" -gt 20 ] && echo "✅ KPM 已编入" || echo "⚠️ KPM 字符串偏少"
+          [ "$PRE_N" -gt 20 ] && echo "✅ preinit 已编入" || echo "⚠️ preinit 字符串偏少"
 
       - name: Package AnyKernel3 zip
         run: |
@@ -105,12 +149,13 @@ jobs:
           sed -i 's|^BLOCK=.*|BLOCK=/dev/block/by-name/boot;|' anykernel.sh
           sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' anykernel.sh
           rm -rf .git
-          zip -r9 "${{ github.workspace }}/AK3-hummer-crdroid17-sukisu.zip" .
-          ls -lh "${{ github.workspace }}/AK3-hummer-crdroid17-sukisu.zip"
+          zip -r9 "${{ github.workspace }}/AK3-hummer-sukisu-susfs.zip" .
+          ls -lh "${{ github.workspace }}/AK3-hummer-sukisu-susfs.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: AK3-hummer-kernel
-          path: AK3-hummer-crdroid17-sukisu.zip
-          if-no-files-found: error
+          path: AK3-hummer-sukisu-susfs.zip
+          if-no-files-found: warn
