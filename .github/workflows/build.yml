@@ -1,4 +1,4 @@
-name: build-hummer-susfs-kernel
+name: build-hummer-sukisu-builtin
 
 on:
   workflow_dispatch:
@@ -17,65 +17,48 @@ jobs:
       - name: Install build dependencies
         run: |
           set -euxo pipefail
+          test -f device.config || { echo "FATAL: device.config missing"; exit 1; }
           sudo apt-get update
           sudo apt-get install -y bc bison flex libssl-dev libelf-dev dwarves zip git curl xz-utils build-essential
 
       - name: Fetch LLVM 22 toolchain
         run: |
           set -euxo pipefail
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o /tmp/llvm.tar.xz "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-X64.tar.xz"
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o /tmp/llvm.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-X64.tar.xz"
           mkdir -p "$HOME/llvm"
           tar -xJf /tmp/llvm.tar.xz --no-same-owner -C "$HOME/llvm" --strip-components=1
           "$HOME/llvm/bin/clang" --version | head -2
 
-      - name: Fetch pinned kernel sources
+      - name: Fetch kernel sources
         run: |
           set -euxo pipefail
           mkdir -p ws
           git clone https://github.com/crdroidandroid/android_kernel_oneplus_sm8750 -b 17.0 ws/common
           rm -rf ws/common/.git
-          # ^ remove git metadata so setlocalversion does not append a "+" to the
-          #   kernel release string; release must stay 6.6.144-4k-g48baf0c723f8
           git clone https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-modules -b 17.0 ws/sm8750-modules
           git clone https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-devicetrees -b 17.0 ws/sm8750-devicetrees
           head -4 ws/common/Makefile
 
-      - name: Integrate SukiSU-Ultra v4.3.0 (built-in)
+      - name: Integrate SukiSU builtin branch
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s v4.3.0
-          test -e drivers/kernelsu/Kconfig
-          ls KernelSU/kernel | head
-          echo "=== 确认 SukiSU 自带 susfs 适配层 ==="
-          test -f KernelSU/kernel/extension/susfs_extension.c && echo "OK: susfs_extension.c" || { echo "FATAL"; exit 1; }
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s 1cfa57340590971cba7521ed536da8ebbedc5f0a
+          echo "=== 源码状态 ==="
+          cd KernelSU
+          git rev-parse HEAD
+          git branch --show-current || echo "(detached)"
+          echo "=== Kconfig 关键项 ==="
+          grep -E "^config (KSU|KPM|KSU_SUSFS)$" kernel/Kconfig
+          echo "=== 目录结构 ==="
+          ls kernel/ | head -20
+          echo "=== preinit ==="
+          test -d kernel/preinit && echo "OK: preinit 存在"
+          echo "=== 检查 susfs 源码 ==="
+          find kernel -name "*susfs*" | head -10
 
-      - name: Integrate SuSFS v2.3.0 (kernel side only)
-        run: |
-          set -euxo pipefail
-          # 用分支最新（v2.3.0），不再固定旧 commit
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 ws/susfs
-          echo "=== SUSFS 版本 ==="
-          grep -m1 SUSFS_VERSION ws/susfs/kernel_patches/include/linux/susfs.h
-
-          # 内核侧源码
-          cp ws/susfs/kernel_patches/fs/susfs.c ws/common/fs/
-          cp ws/susfs/kernel_patches/include/linux/susfs.h \
-             ws/susfs/kernel_patches/include/linux/susfs_def.h ws/common/include/linux/
-
-          # 内核侧 patch
-          cd ws/common
-          patch -p1 --forward < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
-
-          echo "=== 检查残留 .rej ==="
-          if find . -name "*.rej" | head -1 | grep -q .; then
-            echo "=== 被拒绝的 hunk ==="
-            find . -name "*.rej" -exec sh -c 'echo "--- {}"; cat {}' \;
-            exit 1
-          fi
-          echo "=== SuSFS 内核 patch 完成 ==="
-
-      - name: Configure (device config + KSU + KPM + SuSFS)
+      - name: Configure
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
@@ -88,27 +71,34 @@ jobs:
 
           echo "=== 配置验证 ==="
           for c in CONFIG_KSU CONFIG_KPM CONFIG_KSU_SUSFS CONFIG_KALLSYMS_ALL \
-                   CONFIG_KPROBES CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL; do
-            grep -q "^${c}=y" .config && echo "OK   $c" || { echo "FATAL $c"; exit 1; }
+                   CONFIG_KPROBES CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL CONFIG_MODULES; do
+            if grep -q "^${c}=y" .config; then
+              echo "OK   $c"
+            else
+              echo "FATAL $c 未启用"
+              grep -E "^# ${c}" .config || true
+              exit 1
+            fi
           done
-          echo "=== SuSFS 子项 ==="
+          echo "=== SuSFS 子项数量 ==="
           grep -c "^CONFIG_KSU_SUSFS.*=y" .config
+          grep -E "^CONFIG_LOCALVERSION" .config
           echo "kernelrelease: $(make -s ARCH=arm64 LLVM=1 kernelrelease)"
 
-      - name: Headers install (preinit dependency)
+      - name: Headers install
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
           make ARCH=arm64 LLVM=1 headers_install
-          test -f usr/include/linux/unistd.h && echo "OK: UAPI headers"
+          test -f usr/include/linux/unistd.h && echo "OK: UAPI headers (preinit enabled)"
 
       - name: Build kernel Image
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
           export PATH="$HOME/llvm/bin:$PATH"
-          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image 2>&1 | tail -50
+          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image 2>&1 | tail -40
           test -f arch/arm64/boot/Image
           ls -lh arch/arm64/boot/Image
 
@@ -120,22 +110,22 @@ jobs:
           echo "=== Linux version ==="
           strings $IMG | grep -m1 "Linux version"
           echo "=== 功能统计 ==="
+          SUS_N=$(strings $IMG | grep -ci susfs)
           KPM_N=$(strings $IMG | grep -ci kpm)
           PRE_N=$(strings $IMG | grep -ci preinit)
-          SUS_N=$(strings $IMG | grep -ci susfs)
+          echo "suSFS 字符串:   $SUS_N"
           echo "KPM 字符串:     $KPM_N"
           echo "preinit 字符串: $PRE_N"
-          echo "suSFS 字符串:   $SUS_N"
-          echo "=== 目标文件 ==="
-          for o in fs/susfs.o extension/kpm/kpm.o extension/kpm/compact.o extension/kpm/super_access.o preinit/preinit.o preinit/blob.o; do
+          echo "=== 编译产物 ==="
+          for o in drivers/kernelsu/ksu.o drivers/kernelsu/preinit/preinit.o drivers/kernelsu/preinit/blob.o; do
             [ -f "$o" ] && echo "OK   $o" || echo "MISS $o"
           done
           echo "=== 结论 ==="
-          [ "$SUS_N" -gt 5 ] && echo "✅ SuSFS 已编入" || { echo "❌ SuSFS 未编入"; exit 1; }
-          [ "$KPM_N" -gt 20 ] && echo "✅ KPM 已编入" || echo "⚠️ KPM 字符串偏少"
-          [ "$PRE_N" -gt 20 ] && echo "✅ preinit 已编入" || echo "⚠️ preinit 字符串偏少"
+          [ "$SUS_N" -gt 10 ] && echo "✅ SuSFS 已编入" || { echo "❌ SuSFS 未编入"; exit 1; }
+          [ "$KPM_N" -gt 10 ] && echo "✅ KPM 已编入" || echo "⚠️ KPM 字符串偏少"
+          [ "$PRE_N" -gt 10 ] && echo "✅ preinit 已编入" || echo "⚠️ preinit 字符串偏少"
 
-      - name: Package AnyKernel3 zip
+      - name: Package AnyKernel3
         run: |
           set -euxo pipefail
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
@@ -149,13 +139,13 @@ jobs:
           sed -i 's|^BLOCK=.*|BLOCK=/dev/block/by-name/boot;|' anykernel.sh
           sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' anykernel.sh
           rm -rf .git
-          zip -r9 "${{ github.workspace }}/AK3-hummer-sukisu-susfs.zip" .
-          ls -lh "${{ github.workspace }}/AK3-hummer-sukisu-susfs.zip"
+          zip -r9 "${{ github.workspace }}/AK3-hummer-sukisu-builtin.zip" .
+          ls -lh "${{ github.workspace }}/AK3-hummer-sukisu-builtin.zip"
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: AK3-hummer-kernel
-          path: AK3-hummer-sukisu-susfs.zip
+          path: AK3-hummer-sukisu-builtin.zip
           if-no-files-found: warn
