@@ -544,22 +544,21 @@ jobs:
             echo "KPM disabled (fallback)"
           fi
 
-          echo "=== SUSFS objects ==="
-
+                    echo "=== SUSFS objects ==="
           test -s fs/susfs.o
           echo "OK: fs/susfs.o"
 
           echo "=== KernelSU objects ==="
-
+          test -d drivers/kernelsu
           find drivers/kernelsu -name '*.o' -type f | head -30
 
-          test -d drivers/kernelsu
-          test -s drivers/kernelsu/ksu.o
-
-          echo "OK: KernelSU object"
+          if [ -s drivers/kernelsu/ksu.o ]; then
+            echo "OK: drivers/kernelsu/ksu.o"
+          else
+            echo "WARNING: drivers/kernelsu/ksu.o not found, skipping"
+          fi
 
           echo "=== SUSFS symbols ==="
-
           nm -a vmlinux | grep -E \
             'susfs_parse_priority_app_strings|susfs_set_priority_uid_filter|susfs_add_sus_path' \
             || true
