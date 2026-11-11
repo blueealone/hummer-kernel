@@ -2,208 +2,639 @@ name: build-hummer-sukisu-builtin-susfs
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_kpm:
+        description: "Try to build with KPM (automatically fallback if it fails)"
+        required: true
+        type: boolean
+        default: true
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+
     defaults:
       run:
         shell: bash
+
+    env:
+      KERNEL_BRANCH: "17.0"
+      SUSFS_BRANCH: "gki-android15-6.6"
+      LLVM_VERSION: "22.1.0"
+
     steps:
-      - name: Checkout this repo (device.config)
+      # ==========================================
+      # 1. Checkout
+      # ==========================================
+      - name: Checkout device config
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           set -euxo pipefail
-          test -f device.config || { echo "FATAL: device.config missing"; exit 1; }
+
+          test -f device.config || {
+            echo "FATAL: device.config missing"
+            exit 1
+          }
+
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev libelf-dev dwarves zip git curl xz-utils build-essential
 
-      - name: Fetch LLVM 22 toolchain
+          sudo apt-get install -y \
+            bc bison flex \
+            libssl-dev libelf-dev \
+            dwarves zip git curl \
+            xz-utils build-essential \
+            python3 python3-pip \
+            cpio rsync kmod \
+            pahole libncurses-dev
+
+      # ==========================================
+      # 2. LLVM 22
+      # ==========================================
+      - name: Fetch LLVM toolchain
         run: |
           set -euxo pipefail
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o /tmp/llvm.tar.xz \
-            "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-X64.tar.xz"
-          mkdir -p "$HOME/llvm"
-          tar -xJf /tmp/llvm.tar.xz --no-same-owner -C "$HOME/llvm" --strip-components=1
-          "$HOME/llvm/bin/clang" --version | head -2
 
+          LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz"
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            -o /tmp/llvm.tar.xz \
+            "$LLVM_URL"
+
+          mkdir -p "$HOME/llvm"
+
+          tar -xJf /tmp/llvm.tar.xz \
+            --no-same-owner \
+            -C "$HOME/llvm" \
+            --strip-components=1
+
+          export PATH="$HOME/llvm/bin:$PATH"
+
+          clang --version
+          ld.lld --version
+
+      # ==========================================
+      # 3. Kernel sources
+      # ==========================================
       - name: Fetch kernel sources
         run: |
           set -euxo pipefail
-          mkdir -p ws
-          git clone https://github.com/crdroidandroid/android_kernel_oneplus_sm8750 -b 17.0 ws/common
-          rm -rf ws/common/.git
-          git clone https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-modules -b 17.0 ws/sm8750-modules
-          git clone https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-devicetrees -b 17.0 ws/sm8750-devicetrees
-          head -4 ws/common/Makefile
 
-      - name: Integrate SuSFS kernel patch
+          mkdir -p ws
+
+          git clone \
+            --branch "$KERNEL_BRANCH" \
+            https://github.com/crdroidandroid/android_kernel_oneplus_sm8750 \
+            ws/common
+
+          git clone \
+            --branch "$KERNEL_BRANCH" \
+            https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-modules \
+            ws/sm8750-modules
+
+          git clone \
+            --branch "$KERNEL_BRANCH" \
+            https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-devicetrees \
+            ws/sm8750-devicetrees
+
+          echo "================================"
+          echo "KERNEL SOURCE INFORMATION"
+          echo "================================"
+
+          for repo in common sm8750-modules sm8750-devicetrees; do
+            echo "=== $repo ==="
+            git -C "ws/$repo" rev-parse HEAD
+            git -C "ws/$repo" log -1 --format="%ci %s"
+          done
+
+          echo "=== Kernel version ==="
+
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' \
+            ws/common/Makefile
+
+          echo "=== Kernel source branch ==="
+
+          git -C ws/common branch --show-current
+
+      # ==========================================
+      # 4. SUSFS integration
+      # ==========================================
+      - name: Integrate SUSFS
         run: |
           set -euxo pipefail
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 ws/susfs
-          echo "=== SUSFS 版本 ==="
-          grep -m1 SUSFS_VERSION ws/susfs/kernel_patches/include/linux/susfs.h
+
+          git clone \
+            --depth=1 \
+            --branch "$SUSFS_BRANCH" \
+            https://gitlab.com/simonpunk/susfs4ksu.git \
+            ws/susfs
+
+          echo "=== SUSFS version ==="
+
+          grep -m1 SUSFS_VERSION \
+            ws/susfs/kernel_patches/include/linux/susfs.h
 
           cd ws/common
+
+          # Copy SUSFS implementation
           cp ../susfs/kernel_patches/fs/susfs.c fs/
+
           cp ../susfs/kernel_patches/include/linux/susfs.h \
-             ../susfs/kernel_patches/include/linux/susfs_def.h include/linux/
-          ls -l include/linux/susfs.h fs/susfs.c
+             ../susfs/kernel_patches/include/linux/susfs_def.h \
+             include/linux/
 
-          echo "=== 应用 patch ==="
-          patch -p1 --forward < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
+          test -f fs/susfs.c
+          test -f include/linux/susfs.h
+          test -f include/linux/susfs_def.h
 
-          if find . -name "*.rej" | head -1 | grep -q .; then
-            echo "=== 被拒绝的 hunk ==="
-            find . -name "*.rej" -exec sh -c 'echo "--- {}"; head -30 {}' \;
+          echo "=== Applying SUSFS patch ==="
+
+          patch --batch -p1 --forward \
+            < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
+
+          if find . -name "*.rej" -print -quit | grep -q .; then
+            echo "FATAL: SUSFS patch rejected"
+
+            find . -name "*.rej" -exec sh -c \
+              'echo "--- $1"; cat "$1"' _ {} \;
+
             exit 1
           fi
-          echo "=== SuSFS 内核 patch 完成 ==="
 
-      - name: Integrate SukiSU builtin branch
+          echo "SUSFS integration completed"
+
+      # ==========================================
+      # 5. SukiSU builtin
+      # ==========================================
+      - name: Integrate SukiSU builtin
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s 1cfa57340590971cba7521ed536da8ebbedc5f0a
-          cd KernelSU
-          echo "=== HEAD ==="
-          git rev-parse HEAD
-          echo "=== Kconfig 项 ==="
-          grep -E "^config (KSU|KPM|KSU_SUSFS)" kernel/Kconfig | head -20
 
-      # ========== 关键修复：补齐缺失的 Kconfig 项 ==========
-      - name: Patch SukiSU Kconfig for PRIORITY_UID_FILTER
+          curl -fLSs \
+            https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh \
+            -o /tmp/sukisu-setup.sh
+
+          bash /tmp/sukisu-setup.sh builtin
+
+          test -d KernelSU
+          test -f drivers/kernelsu/Kconfig
+
+          echo "=== SukiSU HEAD ==="
+
+          git -C KernelSU rev-parse HEAD
+
+          echo "=== SukiSU branch ==="
+
+          git -C KernelSU branch --show-current
+
+          echo "=== SukiSU Kconfig ==="
+
+          grep -E '^config (KSU|KPM|KSU_SUSFS)' \
+            KernelSU/kernel/Kconfig | head -40
+
+      # ==========================================
+      # 6. PRIORITY UID FILTER
+      # ==========================================
+      - name: Patch SukiSU PRIORITY_UID_FILTER
         working-directory: ${{ github.workspace }}/ws/common/KernelSU
         run: |
           set -euxo pipefail
+
           KCONFIG=kernel/Kconfig
 
-          echo "=== 检查是否已有 PRIORITY_UID_FILTER ==="
-          if grep -q "KSU_SUSFS_PRIORITY_UID_FILTER" "$KCONFIG"; then
-            echo "已存在，跳过"
-            exit 0
+          if grep -q '^config KSU_SUSFS_PRIORITY_UID_FILTER$' "$KCONFIG"; then
+            echo "PRIORITY_UID_FILTER already exists"
+          else
+            python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("kernel/Kconfig")
+          s = p.read_text()
+
+          menu = 'menu "KernelSU - SUSFS"'
+
+          if menu not in s:
+              raise SystemExit("FATAL: SUSFS menu not found")
+
+          start = s.index(menu)
+          end = s.find("\nendmenu", start)
+
+          if end < 0:
+              raise SystemExit("FATAL: SUSFS endmenu not found")
+
+          entry = """
+          config KSU_SUSFS_PRIORITY_UID_FILTER
+              bool "Enable priority uid filter"
+              depends on KSU_SUSFS
+              default y
+              help
+                Allow adding uid to priority filter list via pkg_observer strings.
+                Required by SukiSU builtin priority uid filter.
+          """
+
+          s = s[:end] + "\n" + entry + s[end:]
+
+          p.write_text(s)
+          PY
           fi
 
-          echo "=== 插入 CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER 定义 ==="
-          # 在 KernelSU - SUSFS menu 的 endmenu 之前插入
-          # 找到 "menu \"KernelSU - SUSFS\"" 之后第一个 endmenu
-          awk '
-            /^menu "KernelSU - SUSFS"/ { inmenu=1 }
-            inmenu && /^endmenu/ && !done {
-              print "config KSU_SUSFS_PRIORITY_UID_FILTER"
-              print "    bool \"Enable priority uid filter\""
-              print "    depends on KSU_SUSFS"
-              print "    default y"
-              print "    help"
-              print "        Allow adding uid to priority filter list via pkg_observer strings."
-              print "        Required by SukiSU builtin branch (susfs_parse_priority_app_strings)."
-              print ""
-              done=1
-            }
-            { print }
-          ' "$KCONFIG" > "$KCONFIG.new"
-          mv "$KCONFIG.new" "$KCONFIG"
+          echo "=== Verify PRIORITY_UID_FILTER ==="
 
-          echo "=== 验证插入结果 ==="
-          grep -A6 "config KSU_SUSFS_PRIORITY_UID_FILTER" "$KCONFIG"
-          echo "=== 确认 endmenu 结构完整 ==="
-          grep -c "^menu" "$KCONFIG"
-          grep -c "^endmenu" "$KCONFIG"
+          grep -A6 \
+            '^config KSU_SUSFS_PRIORITY_UID_FILTER$' \
+            "$KCONFIG"
 
-      - name: Configure
+      # ==========================================
+      # 7. Configure
+      # ==========================================
+      - name: Configure kernel
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
-          export PATH="$HOME/llvm/bin:$PATH"
-          cp "${{ github.workspace }}/device.config" .config
-          printf "CONFIG_KSU=y\nCONFIG_KPM=y\nCONFIG_KSU_SUSFS=y\nCONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y\n" >> .config
-          sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' .config
-          sed -i 's/^CONFIG_LOCALVERSION="-4k"/CONFIG_LOCALVERSION="-4k-g48baf0c723f8"/' .config
-          make ARCH=arm64 LLVM=1 olddefconfig
 
-          echo "=== 配置验证 ==="
-          for c in CONFIG_KSU CONFIG_KPM CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER \
-                   CONFIG_KALLSYMS_ALL CONFIG_KPROBES CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL CONFIG_MODULES; do
-            if grep -q "^${c}=y" .config; then
-              echo "OK   $c"
-            else
-              echo "FATAL $c 未启用"
-              grep -E "^# ${c}" .config || true
+          export PATH="$HOME/llvm/bin:$PATH"
+
+          cp "${{ github.workspace }}/device.config" .config
+
+          # Remove conflicting old definitions
+          sed -i \
+            -e '/^CONFIG_KSU=/d' \
+            -e '/^CONFIG_KPM=/d' \
+            -e '/^CONFIG_KSU_SUSFS=/d' \
+            -e '/^CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=/d' \
+            -e '/^CONFIG_KALLSYMS=/d' \
+            -e '/^CONFIG_KALLSYMS_ALL=/d' \
+            .config
+
+          cat >> .config <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KPM=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          EOF
+
+          # Avoid automatic git suffix changes
+          sed -i \
+            's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' \
+            .config
+
+          export ARCH=arm64
+          export LLVM=1
+
+          make olddefconfig
+
+          echo "================================"
+          echo "CONFIGURATION VALIDATION"
+          echo "================================"
+
+          for c in \
+            CONFIG_KSU \
+            CONFIG_KPM \
+            CONFIG_KSU_SUSFS \
+            CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER \
+            CONFIG_KALLSYMS \
+            CONFIG_KALLSYMS_ALL \
+            CONFIG_KPROBES \
+            CONFIG_EXT4_FS \
+            CONFIG_MODULES; do
+
+            if ! grep -qx "${c}=y" .config; then
+              echo "FATAL: $c is not enabled"
+              grep -E "^# ${c}|^${c}=" .config || true
               exit 1
             fi
-          done
-          echo "=== SuSFS 子项数 ==="
-          grep -c "^CONFIG_KSU_SUSFS.*=y" .config
-          echo "kernelrelease: $(make -s ARCH=arm64 LLVM=1 kernelrelease)"
 
-      - name: Headers install
+            echo "OK: $c"
+          done
+
+          echo "=== SUSFS options ==="
+
+          grep -E '^CONFIG_KSU_SUSFS.*=y$' .config || true
+
+          echo "=== Kernel release ==="
+
+          make -s kernelrelease
+
+      # ==========================================
+      # 8. Kernel source compatibility
+      # ==========================================
+      - name: Check kernel compatibility
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
-          export PATH="$HOME/llvm/bin:$PATH"
-          make ARCH=arm64 LLVM=1 headers_install
-          test -f usr/include/linux/unistd.h && echo "OK: UAPI headers"
 
+          export PATH="$HOME/llvm/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
+
+          VERSION=$(make -s kernelversion)
+
+          echo "Kernel version: $VERSION"
+
+          case "$VERSION" in
+            6.6.*)
+              echo "OK: Linux 6.6 kernel family"
+              ;;
+            *)
+              echo "FATAL: unexpected kernel version"
+              exit 1
+              ;;
+          esac
+
+          echo "=== LSM structure ==="
+
+          grep -R -n 'struct lsm_blob_sizes' \
+            include/linux security/selinux || true
+
+          echo "=== Kernel source commit ==="
+
+          git log -1 --format='%H%n%ci%n%s'
+
+          echo "=== Kernel configuration ==="
+
+          grep -E \
+            'CONFIG_(KSU|KPM|KSU_SUSFS|KALLSYMS_ALL)=' \
+            .config
+
+      # ==========================================
+      # 9. Headers
+      # ==========================================
+      - name: Install headers
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+
+          export PATH="$HOME/llvm/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
+
+          make headers_install
+
+          test -f usr/include/linux/unistd.h
+
+          echo "UAPI headers installed"
+
+      # ==========================================
+      # 10. Build Image
+      # ==========================================
       - name: Build kernel Image
         working-directory: ${{ github.workspace }}/ws/common
         run: |
-          set -euxo pipefail
+          set -uo pipefail
+
           export PATH="$HOME/llvm/bin:$PATH"
-          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image
-          test -f arch/arm64/boot/Image
+          export ARCH=arm64
+          export LLVM=1
+
+          JOBS=$(nproc)
+
+          echo "================================"
+          echo "BUILD KERNEL"
+          echo "================================"
+
+          echo "CPU jobs: $JOBS"
+          echo "KPM requested: ${{ inputs.enable_kpm }}"
+
+          if make -j"$JOBS" Image; then
+            echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
+            echo "KPM_STATUS=ENABLED" >> "$GITHUB_ENV"
+
+          else
+            echo "Initial build failed"
+
+            if [ "${{ inputs.enable_kpm }}" != "true" ]; then
+              echo "KPM fallback not requested"
+              exit 1
+            fi
+
+            echo "================================"
+            echo "RETRY WITHOUT KPM"
+            echo "================================"
+
+            sed -i \
+              -e '/^CONFIG_KPM=/d' \
+              -e '/^# CONFIG_KPM is not set/d' \
+              .config
+
+            echo "# CONFIG_KPM is not set" >> .config
+
+            make olddefconfig
+
+            if grep -qx 'CONFIG_KPM=y' .config; then
+              echo "FATAL: KPM could not be disabled"
+              exit 1
+            fi
+
+            # Clean partial objects but preserve configuration
+            make clean
+
+            if ! make -j"$JOBS" Image; then
+              echo "FATAL: kernel build failed without KPM"
+              exit 1
+            fi
+
+            echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
+            echo "KPM_STATUS=DISABLED_FALLBACK" >> "$GITHUB_ENV"
+          fi
+
+          test -s arch/arm64/boot/Image
+
+          echo "=== Image size ==="
           ls -lh arch/arm64/boot/Image
 
-      - name: Verify all features
+      # ==========================================
+      # 11. Verify features
+      # ==========================================
+      - name: Verify kernel features
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
-          IMG=arch/arm64/boot/Image
-          echo "=== Linux version ==="
-          strings $IMG | grep -m1 "Linux version"
-          echo "=== 功能统计 ==="
-          SUS_N=$(strings $IMG | grep -ci susfs)
-          KPM_N=$(strings $IMG | grep -ci kpm)
-          PRE_N=$(strings $IMG | grep -ci preinit)
-          echo "suSFS 字符串:   $SUS_N"
-          echo "KPM 字符串:     $KPM_N"
-          echo "preinit 字符串: $PRE_N"
-          echo "=== 关键函数符号 ==="
-          for s in susfs_parse_priority_app_strings susfs_set_priority_uid_filter susfs_add_sus_path; do
-            strings $IMG | grep -qx "$s" && echo "OK   $s" || echo "MISS $s"
-          done
-          echo "=== 产物 ==="
-          for o in fs/susfs.o drivers/kernelsu/ksu.o drivers/kernelsu/preinit/preinit.o; do
-            [ -f "$o" ] && echo "OK   $o" || echo "MISS $o"
-          done
-          echo "=== 结论 ==="
-          [ "$SUS_N" -gt 10 ] && echo "✅ SuSFS 已编入" || { echo "❌ SuSFS 未编入"; exit 1; }
-          [ "$KPM_N" -gt 10 ] && echo "✅ KPM 已编入" || echo "⚠️ KPM 字符串偏少"
-          [ "$PRE_N" -gt 10 ] && echo "✅ preinit 已编入" || echo "⚠️ preinit 字符串偏少"
 
+          IMG=arch/arm64/boot/Image
+
+          test -s "$IMG"
+          test -s vmlinux
+
+          echo "================================"
+          echo "KERNEL VERIFICATION"
+          echo "================================"
+
+          echo "=== Kernel release ==="
+
+          export PATH="$HOME/llvm/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
+
+          make -s kernelrelease
+
+          echo "=== Feature configuration ==="
+
+          for c in \
+            CONFIG_KSU \
+            CONFIG_KSU_SUSFS \
+            CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER \
+            CONFIG_KALLSYMS_ALL; do
+
+            grep -qx "${c}=y" .config || {
+              echo "FATAL: $c missing"
+              exit 1
+            }
+
+            echo "OK: $c"
+          done
+
+          echo "=== KPM status ==="
+
+          if grep -qx 'CONFIG_KPM=y' .config; then
+            echo "KPM enabled"
+          else
+            echo "KPM disabled (fallback)"
+          fi
+
+          echo "=== SUSFS objects ==="
+
+          test -s fs/susfs.o
+          echo "OK: fs/susfs.o"
+
+          echo "=== KernelSU objects ==="
+
+          find drivers/kernelsu -name '*.o' -type f | head -30
+
+          test -d drivers/kernelsu
+          test -s drivers/kernelsu/ksu.o
+
+          echo "OK: KernelSU object"
+
+          echo "=== SUSFS symbols ==="
+
+          nm -a vmlinux | grep -E \
+            'susfs_parse_priority_app_strings|susfs_set_priority_uid_filter|susfs_add_sus_path' \
+            || true
+
+          echo "=== Image ==="
+
+          file "$IMG"
+          sha256sum "$IMG"
+
+          echo "=== Verification completed ==="
+
+      # ==========================================
+      # 12. Build information
+      # ==========================================
+      - name: Generate build information
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+
+          export PATH="$HOME/llvm/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
+
+          cd "${{ github.workspace }}"
+
+          {
+            echo "Device: hummer / PKR110"
+            echo "ROM: crDroid 13.1"
+            echo "Android: 17"
+            echo "Kernel branch: $KERNEL_BRANCH"
+            echo "Kernel release: $(make -s -C ws/common kernelrelease)"
+            echo "Kernel commit: $(git -C ws/common rev-parse HEAD)"
+            echo "Modules commit: $(git -C ws/sm8750-modules rev-parse HEAD)"
+            echo "Devicetree commit: $(git -C ws/sm8750-devicetrees rev-parse HEAD)"
+            echo "SukiSU commit: $(git -C ws/common/KernelSU rev-parse HEAD)"
+            echo "SUSFS branch: $SUSFS_BRANCH"
+            echo "LLVM: $LLVM_VERSION"
+            echo "KPM status: $KPM_STATUS"
+            echo "Build: $KERNEL_BUILD"
+            echo "Date UTC: $(date -u)"
+            echo ""
+            echo "=== Kernel config ==="
+            grep -E '^CONFIG_(KSU|KPM|KSU_SUSFS|KALLSYMS_ALL)=' \
+              ws/common/.config || true
+            echo ""
+            echo "=== Image SHA256 ==="
+            sha256sum ws/common/arch/arm64/boot/Image
+          } > BUILD-INFO.txt
+
+          cat BUILD-INFO.txt
+
+      # ==========================================
+      # 13. Package AnyKernel3
+      # ==========================================
       - name: Package AnyKernel3
         run: |
           set -euxo pipefail
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
-          cp ws/common/arch/arm64/boot/Image ak3/Image
-          cd ak3
-          sed -i 's/^device.name1=.*/device.name1=hummer/' anykernel.sh
-          sed -i 's/^device.name2=.*/device.name2=PKR110/' anykernel.sh
-          sed -i 's/^device.name3=.*/device.name3=/' anykernel.sh
-          sed -i 's/^device.name4=.*/device.name4=/' anykernel.sh
-          sed -i 's/^device.name5=.*/device.name5=/' anykernel.sh
-          sed -i 's|^BLOCK=.*|BLOCK=/dev/block/by-name/boot;|' anykernel.sh
-          sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' anykernel.sh
-          rm -rf .git
-          zip -r9 "${{ github.workspace }}/AK3-hummer-builtin-susfs.zip" .
-          ls -lh "${{ github.workspace }}/AK3-hummer-builtin-susfs.zip"
 
-      - name: Upload
+          git clone \
+            --depth=1 \
+            https://github.com/osm0sis/AnyKernel3 \
+            ak3
+
+          cp ws/common/arch/arm64/boot/Image ak3/Image
+
+          cd ak3
+
+          # Device identification
+          sed -i \
+            's/^device.name1=.*/device.name1=hummer/' \
+            anykernel.sh
+
+          sed -i \
+            's/^device.name2=.*/device.name2=PKR110/' \
+            anykernel.sh
+
+          sed -i \
+            's/^device.name3=.*/device.name3=/' \
+            anykernel.sh
+
+          sed -i \
+            's/^device.name4=.*/device.name4=/' \
+            anykernel.sh
+
+          sed -i \
+            's/^device.name5=.*/device.name5=/' \
+            anykernel.sh
+
+          # Boot partition
+          sed -i \
+            's|^BLOCK=.*|BLOCK=/dev/block/by-name/boot;|' \
+            anykernel.sh
+
+          # A/B device
+          sed -i \
+            's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' \
+            anykernel.sh
+
+          # Remove repository metadata
+          rm -rf .git
+
+          zip -r9 \
+            "${{ github.workspace }}/AK3-hummer-builtin-susfs.zip" \
+            .
+
+          cd "${{ github.workspace }}"
+
+          ls -lh AK3-hummer-builtin-susfs.zip
+
+      # ==========================================
+      # 14. Upload
+      # ==========================================
+      - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: AK3-hummer-kernel
-          path: AK3-hummer-builtin-susfs.zip
+          name: AK3-hummer-crDroid13.1-builtin-susfs
+          path: |
+            AK3-hummer-builtin-susfs.zip
+            BUILD-INFO.txt
           if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
