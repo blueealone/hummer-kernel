@@ -168,7 +168,7 @@ jobs:
 
           echo "SUSFS integration completed"
 
-      # ==========================================
+            # ==========================================
       # 5. SukiSU builtin
       # ==========================================
       - name: Integrate SukiSU builtin
@@ -186,17 +186,66 @@ jobs:
           test -f drivers/kernelsu/Kconfig
 
           echo "=== SukiSU HEAD ==="
-
           git -C KernelSU rev-parse HEAD
 
-          echo "=== SukiSU branch ==="
-
-          git -C KernelSU branch --show-current
-
           echo "=== SukiSU Kconfig ==="
-
           grep -E '^config (KSU|KPM|KSU_SUSFS)' \
-            KernelSU/kernel/Kconfig | head -40
+            KernelSU/kernel/Kconfig | head -40 || true
+
+      # ==========================================
+      # 5.1 Fix SukiSU SELinux compilation
+      # ==========================================
+      - name: Fix SukiSU SELinux rules
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+
+          FILE="KernelSU/kernel/selinux/rules.c"
+          test -f "$FILE"
+
+          echo "=== Before patch ==="
+          grep -nE 'seqno0|policydb->latest_granting' "$FILE" || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("KernelSU/kernel/selinux/rules.c")
+          s = p.read_text()
+
+          fixes = {
+              "selinux_status_update_policyload(seqno0);":
+              "selinux_status_update_policyload(seqno);",
+
+              "policydb->latest_granting = old_pol->latest_granting + 1;":
+              "pol->latest_granting = old_pol->latest_granting + 1;",
+          }
+
+          for old, new in fixes.items():
+              count = s.count(old)
+
+              if count != 1:
+                  raise SystemExit(
+                      f"FATAL: expected exactly one occurrence, "
+                      f"found {count}: {old}"
+                  )
+
+              s = s.replace(old, new, 1)
+              print(f"FIXED: {old} -> {new}")
+
+          p.write_text(s)
+          PY
+
+          echo "=== Verify patch ==="
+
+          if grep -nE 'seqno0|policydb->latest_granting' "$FILE"; then
+            echo "FATAL: old code still exists"
+            exit 1
+          fi
+
+          grep -n 'selinux_status_update_policyload(seqno)' "$FILE"
+          grep -n 'pol->latest_granting = old_pol->latest_granting + 1' "$FILE"
+
+          echo "SukiSU SELinux fixes applied successfully"
 
       # ==========================================
       # 6. PRIORITY UID FILTER
@@ -239,16 +288,12 @@ jobs:
           """
 
           s = s[:end] + "\n" + entry + s[end:]
-
           p.write_text(s)
           PY
           fi
 
           echo "=== Verify PRIORITY_UID_FILTER ==="
-
-          grep -A6 \
-            '^config KSU_SUSFS_PRIORITY_UID_FILTER$' \
-            "$KCONFIG"
+          grep -A6 '^config KSU_SUSFS_PRIORITY_UID_FILTER$' "$KCONFIG"
 
       # ==========================================
       # 7. Configure
