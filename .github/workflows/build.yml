@@ -273,6 +273,102 @@ jobs:
 
           echo "SukiSU SELinux fixes applied successfully"
 
+                # ==========================================
+
+      # 5.2 Fix SukiSU Safe Mode false positive
+      # ==========================================
+      - name: Fix SukiSU Safe Mode
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("KernelSU/kernel/runtime/ksud.c")
+          s = p.read_text()
+
+          # 1. Add a permanent decision state.
+          old = "static bool safe_mode_flag = false;"
+          new = """static bool safe_mode_flag = false;
+          static bool safe_mode_decided = false;"""
+
+          if s.count(old) != 1:
+              raise SystemExit("FATAL: safe_mode_flag anchor mismatch")
+
+          s = s.replace(old, new, 1)
+
+          # 2. Replace safe mode decision logic.
+          start = s.index("bool ksu_is_safe_mode(void)")
+          end = s.index(
+              "static void vol_detector_event",
+              start
+          )
+
+          old_func = s[start:end]
+
+          new_func = """bool ksu_is_safe_mode(void)
+          {
+              if (READ_ONCE(safe_mode_decided))
+                  return READ_ONCE(safe_mode_flag);
+
+              /*
+               * Freeze the decision before unregistering the input hook.
+               * Later calls must never change the result.
+               */
+              WRITE_ONCE(safe_mode_decided, true);
+
+              stop_input_hook();
+
+              if (!READ_ONCE(safe_mode_flag))
+                  return false;
+
+              pr_info("volume keys pressed max times, safe mode detected!\\n");
+              return true;
+          }
+
+          """
+
+          if "already_checked" not in old_func:
+              raise SystemExit("FATAL: unexpected safe mode implementation")
+
+          s = s[:start] + new_func + s[end:]
+
+          # 3. Ignore volume events after the decision or boot lifecycle.
+          old_event = """    static int vol_down_cnt = 0;
+
+              if (!value)"""
+
+          new_event = """    static int vol_down_cnt = 0;
+
+              if (READ_ONCE(safe_mode_decided) ||
+                  READ_ONCE(ksu_module_mounted) ||
+                  READ_ONCE(ksu_boot_completed))
+                  return;
+
+              if (!value)"""
+
+          if s.count(old_event) != 1:
+              raise SystemExit("FATAL: volume event anchor mismatch")
+
+          s = s.replace(old_event, new_event, 1)
+
+          p.write_text(s)
+
+          print("Safe mode patch applied successfully")
+          PY
+
+          echo "=== Verify safe mode patch ==="
+
+          grep -n -A22 'bool ksu_is_safe_mode' \
+            KernelSU/kernel/runtime/ksud.c
+
+          grep -n -A15 'static void vol_detector_event' \
+            KernelSU/kernel/runtime/ksud.c
+
+          grep -n 'safe_mode_decided' \
+            KernelSU/kernel/runtime/ksud.c
+
       # ==========================================
       # 6. PRIORITY UID FILTER
       # ==========================================
