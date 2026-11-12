@@ -417,8 +417,9 @@ jobs:
           echo "=== Verify PRIORITY_UID_FILTER ==="
           grep -A6 '^config KSU_SUSFS_PRIORITY_UID_FILTER$' "$KCONFIG"
 
+      
       # ==========================================
-      # 7. Configure
+      # 7. Configure kernel
       # ==========================================
       - name: Configure kernel
         working-directory: ${{ github.workspace }}/ws/common
@@ -426,27 +427,62 @@ jobs:
           set -euxo pipefail
 
           export PATH="$HOME/llvm/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
 
           cp "${{ github.workspace }}/device.config" .config
 
-          # Remove conflicting old definitions
-          sed -i \
-            -e '/^CONFIG_KSU=/d' \
-            -e '/^CONFIG_KPM=/d' \
-            -e '/^CONFIG_KSU_SUSFS=/d' \
-            -e '/^CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=/d' \
-            -e '/^CONFIG_KALLSYMS=/d' \
-            -e '/^CONFIG_KALLSYMS_ALL=/d' \
-            .config
+          echo "=== Remove conflicting definitions ==="
+
+          for c in \
+            KSU \
+            KPM \
+            KSU_SUSFS \
+            KSU_SUSFS_PRIORITY_UID_FILTER \
+            DEBUG_KERNEL \
+            KALLSYMS \
+            KALLSYMS_ALL; do
+
+            sed -i \
+              -e "/^CONFIG_${c}=/d" \
+              -e "/^# CONFIG_${c} is not set$/d" \
+              .config
+          done
+
+          echo "=== Enable required dependencies ==="
 
           cat >> .config <<'EOF'
-          CONFIG_KSU=y
-          CONFIG_KPM=y
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y
+
+          # ======================================
+          # Architecture and security
+          # ======================================
+
+          CONFIG_SECURITY=y
+          CONFIG_SECURITY_SELINUX=y
+          CONFIG_EXT4_FS=y
+
+          # ======================================
+          # Kernel debugging and symbols
+          # ======================================
+
+          CONFIG_DEBUG_KERNEL=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
-          CONFIG_KPROBES=y
+
+          # ======================================
+          # SukiSU Ultra
+          # ======================================
+
+          CONFIG_KSU=y
+          CONFIG_KPM=y
+
+          # ======================================
+          # SUSFS
+          # ======================================
+
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y
+
           EOF
 
           # Avoid automatic git suffix changes
@@ -454,37 +490,55 @@ jobs:
             's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' \
             .config
 
-          export ARCH=arm64
-          export LLVM=1
+          echo "=== Resolve Kconfig dependencies ==="
 
           make olddefconfig
 
-          echo "================================"
-          echo "CONFIGURATION VALIDATION"
-          echo "================================"
+          echo "=== Final configuration ==="
 
           for c in \
-            CONFIG_KSU \
-            CONFIG_KPM \
-            CONFIG_KSU_SUSFS \
-            CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER \
-            CONFIG_KALLSYMS \
-            CONFIG_KALLSYMS_ALL \
-            CONFIG_EXT4_FS \
-            CONFIG_MODULES; do
-  
-            if ! grep -qx "${c}=y" .config; then
-              echo "FATAL: $c is not enabled"
-              grep -E "^# ${c}|^${c}=" .config || true
+            64BIT \
+            SECURITY \
+            SECURITY_SELINUX \
+            EXT4_FS \
+            DEBUG_KERNEL \
+            KALLSYMS \
+            KALLSYMS_ALL \
+            KSU \
+            KPM \
+            KSU_SUSFS \
+            KSU_SUSFS_PRIORITY_UID_FILTER; do
+
+            if ! grep -qx "CONFIG_${c}=y" .config; then
+              echo "FATAL: CONFIG_${c} is not enabled"
+
+              grep -E \
+                "^CONFIG_${c}=|^# CONFIG_${c} is not set" \
+                .config || true
+
               exit 1
             fi
 
-            echo "OK: $c"
+            echo "OK: CONFIG_${c}=y"
           done
 
-          echo "=== SUSFS options ==="
+          echo "=== Verify KPM dependencies ==="
 
-          grep -E '^CONFIG_KSU_SUSFS.*=y$' .config || true
+          grep -E \
+            '^CONFIG_(KSU|KPM|64BIT|KALLSYMS|KALLSYMS_ALL|DEBUG_KERNEL)=y$' \
+            .config
+
+          echo "=== Verify SUSFS configuration ==="
+
+          grep -E \
+            '^CONFIG_KSU_SUSFS.*=y$' \
+            .config || true
+
+          echo "=== Verify KPROBES status ==="
+
+          grep -E \
+            '^CONFIG_KPROBES=|^# CONFIG_KPROBES is not set' \
+            .config || true
 
           echo "=== Kernel release ==="
 
@@ -617,8 +671,9 @@ jobs:
           echo "=== Image size ==="
           ls -lh arch/arm64/boot/Image
 
+      
       # ==========================================
-      # 11. Verify features
+      # 11. Verify kernel features
       # ==========================================
       - name: Verify kernel features
         working-directory: ${{ github.workspace }}/ws/common
@@ -630,28 +685,33 @@ jobs:
           test -s "$IMG"
           test -s vmlinux
 
+          export PATH="$HOME/llvm/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
+
           echo "================================"
           echo "KERNEL VERIFICATION"
           echo "================================"
 
           echo "=== Kernel release ==="
-
-          export PATH="$HOME/llvm/bin:$PATH"
-          export ARCH=arm64
-          export LLVM=1
-
           make -s kernelrelease
 
-          echo "=== Feature configuration ==="
+          echo "=== Required configurations ==="
 
           for c in \
-            CONFIG_KSU \
-            CONFIG_KSU_SUSFS \
-            CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER \
-            CONFIG_KALLSYMS_ALL; do
+            64BIT \
+            SECURITY \
+            SECURITY_SELINUX \
+            EXT4_FS \
+            DEBUG_KERNEL \
+            KALLSYMS \
+            KALLSYMS_ALL \
+            KSU \
+            KSU_SUSFS \
+            KSU_SUSFS_PRIORITY_UID_FILTER; do
 
-            grep -qx "${c}=y" .config || {
-              echo "FATAL: $c missing"
+            grep -qx "CONFIG_${c}=y" .config || {
+              echo "FATAL: CONFIG_${c} missing"
               exit 1
             }
 
@@ -661,34 +721,41 @@ jobs:
           echo "=== KPM status ==="
 
           if grep -qx 'CONFIG_KPM=y' .config; then
-            echo "KPM enabled"
+            echo "KPM ENABLED"
           else
-            echo "KPM disabled (fallback)"
+            echo "KPM DISABLED (fallback)"
           fi
 
-                    echo "=== SUSFS objects ==="
+          echo "=== SUSFS objects ==="
+
           test -s fs/susfs.o
           echo "OK: fs/susfs.o"
 
           echo "=== KernelSU objects ==="
-          test -d drivers/kernelsu
-          find drivers/kernelsu -name '*.o' -type f | head -30
 
-          if [ -s drivers/kernelsu/ksu.o ]; then
-            echo "OK: drivers/kernelsu/ksu.o"
-          else
-            echo "WARNING: drivers/kernelsu/ksu.o not found, skipping"
-          fi
+          test -d drivers/kernelsu
+
+          find drivers/kernelsu \
+            -name '*.o' \
+            -type f | head -30
 
           echo "=== SUSFS symbols ==="
+
           nm -a vmlinux | grep -E \
             'susfs_parse_priority_app_strings|susfs_set_priority_uid_filter|susfs_add_sus_path' \
             || true
 
-          echo "=== Image ==="
+          echo "=== Kernel image ==="
 
           file "$IMG"
+          ls -lh "$IMG"
           sha256sum "$IMG"
+
+          echo "=== Kernel config summary ==="
+
+          grep -E \
+            '^CONFIG_(64BIT|SECURITY|SECURITY_SELINUX|EXT4_FS|DEBUG_KERNEL|KALLSYMS|KALLSYMS_ALL|KSU|KPM|KSU_SUSFS.*)=y$' \
+            .config
 
           echo "=== Verification completed ==="
 
