@@ -191,7 +191,24 @@ jobs:
           echo "=== SukiSU Kconfig ==="
           grep -E '^config (KSU|KPM|KSU_SUSFS)' \
             KernelSU/kernel/Kconfig | head -40 || true
+            
 
+      - name: Inspect SukiSU Safe Mode
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+
+          echo "=== Safe mode implementation ==="
+
+          grep -R -n -E \
+            'ksu_is_safe_mode|ksu_handle_input_handle_event|volumedown_pressed_count|ksu_stop_input_hook_runtime|ksu_boot_completed|ksu_module_mounted' \
+            KernelSU/kernel
+
+          echo "=== Relevant source files ==="
+
+          find KernelSU/kernel/runtime -maxdepth 2 -type f
+
+      
       # ==========================================
       # 5.1 Fix SukiSU SELinux compilation
       # ==========================================
