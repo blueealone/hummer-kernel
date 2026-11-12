@@ -347,10 +347,9 @@ jobs:
             CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER \
             CONFIG_KALLSYMS \
             CONFIG_KALLSYMS_ALL \
-            CONFIG_KPROBES \
             CONFIG_EXT4_FS \
             CONFIG_MODULES; do
-
+  
             if ! grep -qx "${c}=y" .config; then
               echo "FATAL: $c is not enabled"
               grep -E "^# ${c}|^${c}=" .config || true
