@@ -208,6 +208,15 @@ jobs:
 
           find KernelSU/kernel/runtime -maxdepth 2 -type f
 
+          echo "=== ksud.c: input event and safe mode ==="
+          sed -n '520,630p' KernelSU/kernel/runtime/ksud.c
+
+          echo "=== ksud.c: boot lifecycle ==="
+          sed -n '1,115p' KernelSU/kernel/runtime/ksud.c
+
+          echo "=== ksud.h ==="
+          cat KernelSU/kernel/runtime/ksud.h
+
       
       # ==========================================
       # 5.1 Fix SukiSU SELinux compilation
