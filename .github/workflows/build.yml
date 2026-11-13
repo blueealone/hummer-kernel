@@ -173,29 +173,21 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
+          
           REPO="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
-          BRANCH="susfs-main"
 
-          echo "=== Verify remote branch ==="
-          git ls-remote --exit-code --heads \
-            "$REPO" "refs/heads/$BRANCH"
+          echo "=== Remote HEAD ==="
+          git ls-remote "$REPO" HEAD
 
-          echo "=== Integrate SukiSU ==="
-          bash /tmp/sukisu-setup.sh "$BRANCH"
+          echo "=== All remote branches ==="
+          git ls-remote --heads "$REPO"
 
-          echo "=== Verify actual checkout ==="
-          ACTUAL_COMMIT=$(git -C KernelSU rev-parse HEAD)
-          echo "Commit: $ACTUAL_COMMIT"
+          echo "=== Search susfs branches ==="
+          git ls-remote --heads "$REPO" | grep -i susfs || true
 
-          echo "=== Verify SUSFS Kconfig ==="
-          grep -R -n '^config KSU_SUSFS$' KernelSU \
-            --include='Kconfig*' || {
-              echo "FATAL: KSU_SUSFS Kconfig missing"
-              exit 1
-          }
-
-          echo "SukiSU susfs-main verification passed"
+          echo "=== Exact branch ==="
+          git ls-remote --exit-code --heads "$REPO" \
+            refs/heads/susfs-main
       
 
       - name: Check Native AVC Spoofing
