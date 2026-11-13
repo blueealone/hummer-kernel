@@ -221,6 +221,31 @@ jobs:
           grep -n -A8 -B2 \
             'PRIORITY_UID_FILTER\|KSU_SUSFS' \
             KernelSU/kernel/Kconfig
+
+      - name: Check Native AVC Spoofing
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+
+          echo "=== Check AVC spoofing symbols ==="
+
+          grep -R -n -E \
+            'susfs_is_avc_log_spoofing_enabled|susfs_ksu_sid|susfs_priv_app_sid|EnableAvcLogSpoofing' \
+            KernelSU/kernel fs security include || true
+
+          echo "=== Check AVC implementation ==="
+
+          grep -n -A15 -B10 \
+            'susfs_is_avc_log_spoofing_enabled' \
+            security/selinux/avc.c || true
+
+          echo "=== Check SUSFS implementation ==="
+
+          grep -n -A10 -B5 \
+            'susfs_is_avc_log_spoofing_enabled' \
+            fs/susfs.c || true      
+
+            
       - name: Inject AVC Log Spoofing
         working-directory: ${{ github.workspace }}/ws/common
         run: |
