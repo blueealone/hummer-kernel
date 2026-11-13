@@ -198,25 +198,29 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "=== Safe mode implementation ==="
+          echo "=== SukiSU commit ==="
+          git -C KernelSU rev-parse HEAD
 
-          grep -R -n -E \
-            'ksu_is_safe_mode|ksu_handle_input_handle_event|volumedown_pressed_count|ksu_stop_input_hook_runtime|ksu_boot_completed|ksu_module_mounted' \
-            KernelSU/kernel
-
-          echo "=== Relevant source files ==="
-
+          echo "=== Runtime files ==="
           find KernelSU/kernel/runtime -maxdepth 2 -type f
 
-          echo "=== ksud.c: input event and safe mode ==="
-          sed -n '520,630p' KernelSU/kernel/runtime/ksud.c
+          echo "=== Safe mode implementation ==="
+          sed -n '470,680p' KernelSU/kernel/runtime/ksud_integration.c
 
-          echo "=== ksud.c: boot lifecycle ==="
-          sed -n '1,115p' KernelSU/kernel/runtime/ksud.c
-
-          echo "=== ksud.h ==="
+          echo "=== Runtime header ==="
           cat KernelSU/kernel/runtime/ksud.h
 
+          echo "=== Boot lifecycle ==="
+          sed -n '1,110p' KernelSU/kernel/runtime/boot_event.c
+
+          echo "=== SELinux rules ==="
+          grep -nE 'seqno|latest_granting|policyload' \
+            KernelSU/kernel/selinux/rules.c || true
+
+          echo "=== SUSFS Kconfig ==="
+          grep -n -A8 -B2 \
+            'PRIORITY_UID_FILTER\|KSU_SUSFS' \
+            KernelSU/kernel/Kconfig
       - name: Inject AVC Log Spoofing
         working-directory: ${{ github.workspace }}/ws/common
         run: |
