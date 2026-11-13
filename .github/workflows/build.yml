@@ -893,8 +893,10 @@ jobs:
 
           make -C "$KP/patch" clean
 
-          make -C "$KP/patch" -j"$JOBS"
+          git -C "$KP" checkout -- patch/include/header.h
 
+          make -C "$KP/patch" -j"$JOBS"
+          
           test -s "$KP/patch/patch"
 
           echo "=== Verify generated resources ==="
