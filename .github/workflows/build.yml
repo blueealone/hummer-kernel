@@ -32,6 +32,8 @@ jobs:
       SUKISU_BRANCH: "builtin-new"
       SUKISU_REPO: "https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
       LLVM_VERSION: "22.1.0"
+      KPM_REPO: "https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch.git"
+      KPM_BRANCH: "main"
 
     steps:
 
@@ -60,6 +62,11 @@ jobs:
             cpio rsync kmod \
             libncurses-dev \
             lz4 zstd
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            zlib1g-dev \
+            cmake \
+            xxd
 
       # ==========================================
       # 2. LLVM 22
@@ -137,6 +144,43 @@ jobs:
           echo "=== Kernel branch ==="
 
           git -C ws/common branch --show-current
+
+          
+      # ==========================================
+      # 3.5. KernelPatch sources
+      # ==========================================
+
+      - name: Fetch KernelPatch sources
+        run: |
+          set -euxo pipefail
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "$KPM_BRANCH" \
+            "$KPM_REPO" \
+            ws/kernelpatch
+
+          echo "=== KernelPatch commit ==="
+
+          git -C ws/kernelpatch rev-parse HEAD
+
+          echo "=== Verify KPM ABI v2 ==="
+
+          grep -q \
+            'SUKISU_KPM_ABI_VERSION 2' \
+            ws/kernelpatch/kernel/patch/sukisu/supercall.h
+
+          grep -q \
+            'SUKISU_KPM_SUPERCALL_MAGIC2' \
+            ws/kernelpatch/kernel/patch/sukisu/supercall.h
+
+          test -s ws/kernelpatch/kernel/Makefile
+          test -s ws/kernelpatch/tools/Makefile
+          test -s ws/kernelpatch/patch/main.cpp
+
+          echo "KernelPatch sources verified"
+
 
       # ==========================================
       # 4. SUSFS integration
@@ -622,11 +666,13 @@ jobs:
 
           echo "UAPI headers installed"
 
+      
       # ==========================================
-      # 11. Build kernel Image
+      # 11. Build kernel with KPM fallback
       # ==========================================
 
       - name: Build kernel Image
+        id: build_kernel
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -uo pipefail
@@ -644,64 +690,235 @@ jobs:
           echo "CPU jobs: $JOBS"
           echo "KPM requested: ${{ inputs.enable_kpm }}"
 
-          if make -j"$JOBS" Image; then
+          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
 
-            echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
+            echo "=== Build with KPM ==="
 
-            if grep -qx 'CONFIG_KPM=y' .config; then
+            if make -j"$JOBS" Image \
+              2>&1 | tee "$RUNNER_TEMP/kernel-kpm.log"; then
+
+              grep -qx 'CONFIG_KPM=y' .config || {
+                echo "FATAL: KPM config disappeared"
+                exit 1
+              }
+
+              grep -Fq -- '-- KPM is enabled' \
+                "$RUNNER_TEMP/kernel-kpm.log" || {
+                echo "FATAL: SukiSU did not enable KPM compilation"
+                exit 1
+              }
+
+              echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
               echo "KPM_STATUS=ENABLED" >> "$GITHUB_ENV"
+              echo "kpm_status=ENABLED" >> "$GITHUB_OUTPUT"
+
             else
-              echo "KPM_STATUS=DISABLED_BY_REQUEST" >> "$GITHUB_ENV"
+
+              echo "================================"
+              echo "KPM BUILD FAILED"
+              echo "RETRY WITHOUT KPM"
+              echo "================================"
+
+              echo "=== Remove KPM configuration ==="
+
+              sed -i \
+                -e '/^CONFIG_KPM=/d' \
+                -e '/^# CONFIG_KPM is not set$/d' \
+                .config
+
+              echo "# CONFIG_KPM is not set" >> .config
+
+              make olddefconfig
+
+              if grep -qx 'CONFIG_KPM=y' .config; then
+                echo "FATAL: KPM could not be disabled"
+                exit 1
+              fi
+
+              echo "=== Clean partial objects ==="
+
+              make clean
+
+              echo "=== Rebuild without KPM ==="
+
+              if ! make -j"$JOBS" Image \
+                2>&1 | tee "$RUNNER_TEMP/kernel-no-kpm.log"; then
+
+                echo "FATAL: kernel build failed without KPM"
+                exit 1
+              fi
+
+              echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
+              echo "KPM_STATUS=DISABLED_FALLBACK" >> "$GITHUB_ENV"
+              echo "kpm_status=ENABLED" >> "$GITHUB_OUTPUT"
+
             fi
 
           else
 
-            echo "Initial kernel build failed"
+            echo "=== KPM disabled by request ==="
 
-            if [ "${{ inputs.enable_kpm }}" != "true" ]; then
-              echo "FATAL: build failed without KPM"
+            ! grep -qx 'CONFIG_KPM=y' .config || {
+              echo "FATAL: unexpected KPM configuration"
               exit 1
-            fi
+            }
 
-            echo "================================"
-            echo "RETRY WITHOUT KPM"
-            echo "================================"
+            if ! make -j"$JOBS" Image \
+              2>&1 | tee "$RUNNER_TEMP/kernel-no-kpm.log"; then
 
-            sed -i \
-              -e '/^CONFIG_KPM=/d' \
-              -e '/^# CONFIG_KPM is not set$/d' \
-              .config
-
-            echo "# CONFIG_KPM is not set" >> .config
-
-            make olddefconfig
-
-            if grep -qx 'CONFIG_KPM=y' .config; then
-              echo "FATAL: KPM could not be disabled"
-              exit 1
-            fi
-
-            echo "=== Clean partial objects ==="
-
-            make clean
-
-            echo "=== Rebuild without KPM ==="
-
-            if ! make -j"$JOBS" Image; then
-              echo "FATAL: kernel build failed without KPM"
+              echo "FATAL: kernel build failed"
               exit 1
             fi
 
             echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
-            echo "KPM_STATUS=DISABLED_FALLBACK" >> "$GITHUB_ENV"
+            echo "KPM_STATUS=DISABLED_BY_REQUEST" >> "$GITHUB_ENV"
+            echo "kpm_status=ENABLED" >> "$GITHUB_OUTPUT"
 
           fi
 
           test -s arch/arm64/boot/Image
+          test -s vmlinux
 
-          echo "=== Image size ==="
+          echo "=== Build result ==="
+
+          echo "KPM status: $(grep '^KPM_STATUS=' "$GITHUB_ENV" | tail -1)"
 
           ls -lh arch/arm64/boot/Image
+
+          
+      # ==========================================
+      # 11.5. Build KernelPatch KPM engine
+      # ==========================================
+
+      - name: Build KernelPatch engine
+        if: ${{ steps.build_kernel.outputs.kpm_status == 'ENABLED' }}
+        run: |
+          set -euxo pipefail
+
+          KP="$GITHUB_WORKSPACE/ws/kernelpatch"
+          JOBS=$(nproc)
+
+          echo "================================"
+          echo "BUILD KPM ENGINE"
+          echo "================================"
+
+          echo "=== Build ARM64 kpimg ==="
+
+          make -C "$KP/kernel" \
+            -j"$JOBS" \
+            TARGET_COMPILE=aarch64-linux-gnu-
+
+          test -s "$KP/kernel/kpimg"
+
+          file "$KP/kernel/kpimg"
+
+          echo "=== Build Linux kptools ==="
+
+          make -C "$KP/tools" -j"$JOBS"
+
+          test -s "$KP/tools/kptools"
+
+          file "$KP/tools/kptools"
+
+          echo "=== Prepare patch resources ==="
+
+          mkdir -p "$KP/patch/res"
+
+          cp "$KP/kernel/kpimg" \
+            "$KP/patch/res/kpimg"
+
+          cp "$KP/tools/kptools" \
+            "$KP/patch/res/kptools-linux"
+
+          # Linux host patcher does not use the Android binary.
+          # main.cpp nevertheless includes its generated header.
+
+          printf '\001' \
+            > "$KP/patch/res/kptools-android"
+
+          echo "=== Build Linux patcher ==="
+
+          make -C "$KP/patch" clean
+
+          make -C "$KP/patch" -j"$JOBS"
+
+          test -s "$KP/patch/patch"
+
+          echo "=== Verify generated resources ==="
+
+          test -s "$KP/patch/include/kpimg_enc.h"
+          test -s "$KP/patch/include/kptools_linux.h"
+          test -s "$KP/patch/include/kptools_android.h"
+
+          echo "=== Verify patcher ==="
+
+          file "$KP/patch/patch"
+
+          echo "=== KernelPatch build information ==="
+
+          git -C "$KP" rev-parse HEAD
+
+          echo "KPM engine build completed"
+
+          
+      # ==========================================
+      # 11.6. Inject KernelPatch into kernel Image
+      # ==========================================
+
+      - name: Inject KernelPatch into Image
+        if: ${{ steps.build_kernel.outputs.kpm_status == 'ENABLED' }}
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+
+          BOOT=arch/arm64/boot
+          PATCH="$GITHUB_WORKSPACE/ws/kernelpatch/patch/patch"
+
+          echo "================================"
+          echo "KPM IMAGE INJECTION"
+          echo "================================"
+
+          test -s "$BOOT/Image"
+          test -s "$PATCH"
+
+          cd "$BOOT"
+
+          echo "=== Preserve original Image ==="
+
+          cp Image Image.unpatched
+
+          rm -f oImage Image.kpm
+
+          echo "=== Execute KernelPatch patcher ==="
+
+          "$PATCH"
+
+          echo "=== Verify patched Image ==="
+
+          if [ ! -s oImage ]; then
+            echo "FATAL: KernelPatch failed to generate oImage"
+            exit 1
+          fi
+
+          mv oImage Image.kpm
+
+          test -s Image.kpm
+
+          echo "=== Compare image sizes ==="
+
+          ls -lh Image.unpatched Image.kpm
+
+          echo "=== SHA256 ==="
+
+          sha256sum Image.unpatched Image.kpm
+
+          echo "=== Image identification ==="
+
+          file Image.kpm
+
+          echo "KPM image injection completed"
+
+
 
       # ==========================================
       # 12. Verify kernel features
@@ -762,12 +979,26 @@ jobs:
             echo "OK: $c"
           done
 
-          echo "=== KPM status ==="
+                    echo "=== KPM verification ==="
 
-          if grep -qx 'CONFIG_KPM=y' .config; then
-            echo "KPM ENABLED"
+          if [ "$KPM_STATUS" = "ENABLED" ]; then
+            echo "KPM build status: ENABLED"
+            grep -qx 'CONFIG_KPM=y' .config
+
+            test -s arch/arm64/boot/Image.kpm
+
+            echo "KPM injected Image:"
+            ls -lh arch/arm64/boot/Image.kpm
+
+            sha256sum arch/arm64/boot/Image.kpm
+
           else
-            echo "KPM DISABLED"
+            echo "KPM build status: $KPM_STATUS"
+
+            if grep -qx 'CONFIG_KPM=y' .config; then
+              echo "FATAL: KPM config is enabled but build status is not ENABLED"
+              exit 1
+            fi
           fi
 
           echo "=== SUSFS object ==="
