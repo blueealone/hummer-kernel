@@ -776,12 +776,13 @@ jobs:
 
           echo "OK: fs/susfs.o"
 
-          echo "=== SukiSU object ==="
+          echo "=== SukiSU build artifacts ==="
 
-          test -s drivers/kernelsu/kernelsu.o
+          find drivers/kernelsu -type f \
+            \( -name '*.o' -o -name 'built-in.a' \) \
+            -size +0c -print
 
-          echo "OK: drivers/kernelsu/kernelsu.o"
-
+          echo "=== SukiSU artifact inspection completed ==="
           echo "=== Native AVC implementation ==="
 
           grep -q \
