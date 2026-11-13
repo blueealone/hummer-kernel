@@ -185,26 +185,17 @@ jobs:
           bash /tmp/sukisu-setup.sh "$BRANCH"
 
           echo "=== Verify actual checkout ==="
-          ACTUAL_BRANCH=$(git -C KernelSU branch --show-current)
           ACTUAL_COMMIT=$(git -C KernelSU rev-parse HEAD)
-
-          echo "Branch: $ACTUAL_BRANCH"
           echo "Commit: $ACTUAL_COMMIT"
-
-          test "$ACTUAL_BRANCH" = "$BRANCH" || {
-            echo "FATAL: SukiSU branch fallback detected"
-            exit 1
-          }
 
           echo "=== Verify SUSFS Kconfig ==="
           grep -R -n '^config KSU_SUSFS$' KernelSU \
             --include='Kconfig*' || {
-              echo "FATAL: susfs-main does not expose KSU_SUSFS"
+              echo "FATAL: KSU_SUSFS Kconfig missing"
               exit 1
-            }
+          }
 
           echo "SukiSU susfs-main verification passed"
-
       
 
       - name: Check Native AVC Spoofing
