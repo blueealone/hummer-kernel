@@ -192,7 +192,47 @@ jobs:
           grep -E '^config (KSU|KPM|KSU_SUSFS)' \
             KernelSU/kernel/Kconfig | head -40 || true
             
+      - name: Enable SUSFS in SukiSU
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
 
+          PATCH="../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+
+          test -d KernelSU || {
+            echo "FATAL: KernelSU directory missing"
+            exit 1
+          }
+
+          test -s "$PATCH" || {
+            echo "FATAL: SUSFS KernelSU patch missing: $PATCH"
+            exit 1
+          }
+
+          echo "=== Check SUSFS Kconfig integration ==="
+
+          if grep -R -q '^config KSU_SUSFS$' KernelSU \
+              --include='Kconfig*'; then
+            echo "KSU_SUSFS Kconfig already exists"
+          else
+            echo "=== Check patch compatibility ==="
+
+            patch --dry-run --batch -p1 --forward \
+              -d KernelSU < "$PATCH"
+
+            echo "=== Apply SUSFS KernelSU patch ==="
+
+            patch --batch -p1 --forward \
+              -d KernelSU < "$PATCH"
+          fi
+
+          echo "=== Verify KSU_SUSFS registration ==="
+
+          grep -R -n -A8 \
+            '^config KSU_SUSFS$' KernelSU \
+            --include='Kconfig*'
+
+          echo "SUSFS Kconfig integration completed"
       
 
       - name: Check Native AVC Spoofing
@@ -279,13 +319,12 @@ jobs:
           echo "=== Remove conflicting definitions ==="
 
           for c in \
-            KSU \
-            KPM \
-            KSU_SUSFS \
-            KSU_SUSFS_PRIORITY_UID_FILTER \
-            DEBUG_KERNEL \
-            KALLSYMS \
-            KALLSYMS_ALL; do
+          KSU \
+          KPM \
+          KSU_SUSFS \
+          DEBUG_KERNEL \
+          KALLSYMS \
+          KALLSYMS_ALL; do
 
             sed -i \
               -e "/^CONFIG_${c}=/d" \
