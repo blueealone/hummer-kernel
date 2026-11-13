@@ -812,6 +812,7 @@ jobs:
       # 11.5. Build KernelPatch KPM engine
       # ==========================================
 
+      
       - name: Build KernelPatch engine
         if: ${{ steps.build_kernel.outputs.kpm_status == 'ENABLED' }}
         run: |
@@ -823,6 +824,36 @@ jobs:
           echo "================================"
           echo "BUILD KPM ENGINE"
           echo "================================"
+
+          echo "=== Fix ARM64 stack protector ==="
+
+          KP_MAKEFILE="$KP/kernel/Makefile"
+
+          python3 - "$KP_MAKEFILE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+
+          old = "CFLAGS += -Wall -fno-builtin -std=gnu11 -nostdinc -mgeneral-regs-only -ffixed-x18"
+          new = old + " -fno-stack-protector"
+
+          if new in s:
+              print("Already fixed")
+          elif s.count(old) == 1:
+              p.write_text(s.replace(old, new))
+              print("Applied -fno-stack-protector")
+          else:
+              raise SystemExit(
+                  "FATAL: ARM64 CFLAGS pattern not found exactly once"
+              )
+          PY
+
+          grep -n '^CFLAGS +=' "$KP_MAKEFILE"
+
+          echo "=== Clean previous build ==="
+          make -C "$KP/kernel" clean
 
           echo "=== Build ARM64 kpimg ==="
 
