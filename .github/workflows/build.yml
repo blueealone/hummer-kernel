@@ -193,34 +193,7 @@ jobs:
             KernelSU/kernel/Kconfig | head -40 || true
             
 
-      - name: Inspect SukiSU Safe Mode
-        working-directory: ${{ github.workspace }}/ws/common
-        run: |
-          set -euxo pipefail
-
-          echo "=== SukiSU commit ==="
-          git -C KernelSU rev-parse HEAD
-
-          echo "=== Runtime files ==="
-          find KernelSU/kernel/runtime -maxdepth 2 -type f
-
-          echo "=== Safe mode implementation ==="
-          sed -n '470,680p' KernelSU/kernel/runtime/ksud_integration.c
-
-          echo "=== Runtime header ==="
-          cat KernelSU/kernel/runtime/ksud.h
-
-          echo "=== Boot lifecycle ==="
-          sed -n '1,110p' KernelSU/kernel/runtime/boot_event.c
-
-          echo "=== SELinux rules ==="
-          grep -nE 'seqno|latest_granting|policyload' \
-            KernelSU/kernel/selinux/rules.c || true
-
-          echo "=== SUSFS Kconfig ==="
-          grep -n -A8 -B2 \
-            'PRIORITY_UID_FILTER\|KSU_SUSFS' \
-            KernelSU/kernel/Kconfig
+      
 
       - name: Check Native AVC Spoofing
         working-directory: ${{ github.workspace }}/ws/common
@@ -246,10 +219,6 @@ jobs:
             fs/susfs.c || true      
 
             
-      - name: Inject AVC Log Spoofing
-        working-directory: ${{ github.workspace }}/ws/common
-        run: |
-         python3 ${{ github.workspace }}/patch_avc.py
          
       # ==========================================
       # 5.1 Fix SukiSU SELinux compilation
@@ -257,228 +226,138 @@ jobs:
       # ==========================================
       # 5.1 Fix SukiSU SELinux rules (old + new source)
       # ==========================================
-      - name: Fix SukiSU SELinux rules
+      - name: Verify SukiSU SELinux rules
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
 
-          FILE="KernelSU/kernel/selinux/rules.c"
+          FILE=KernelSU/kernel/selinux/rules.c
+
           test -f "$FILE"
 
-          echo "=== SELinux rules source before compatibility patch ==="
-          grep -nE 'selinux_status_update_policyload|latest_granting' "$FILE" || true
+          echo "=== SELinux policy compatibility ==="
 
-          python3 - <<'PY'
-          from pathlib import Path
+          grep -nE \
+            'selinux_status_update_policyload|latest_granting' \
+            "$FILE"
 
-          p = Path("KernelSU/kernel/selinux/rules.c")
-          s = p.read_text()
-
-          # SukiSU changed rules.c upstream. Apply only the two legacy
-          # compatibility fixes when their old expressions are present.
-          # If upstream has already incorporated a fix, leave it untouched.
-          fixes = (
-              (
-                  "selinux_status_update_policyload(seqno0);",
-                  "selinux_status_update_policyload(seqno);",
-              ),
-              (
-                  "policydb->latest_granting = old_pol->latest_granting + 1;",
-                  "pol->latest_granting = old_pol->latest_granting + 1;",
-              ),
-          )
-
-          for old, new in fixes:
-              count = s.count(old)
-
-              if count > 1:
-                  raise SystemExit(
-                      f"FATAL: ambiguous legacy SELinux expression "
-                      f"({count} occurrences): {old}"
-                  )
-
-              if count == 1:
-                  s = s.replace(old, new, 1)
-                  print(f"PATCHED: {old} -> {new}")
-              else:
-                  print(f"ALREADY UPDATED upstream: {old}")
-
-          # Do not silently accept an unknown/incompatible rules.c layout.
-          if "seqno0" in s:
-              raise SystemExit("FATAL: stale seqno0 reference remains")
-
-          if "policydb->latest_granting = old_pol->latest_granting + 1;" in s:
-              raise SystemExit("FATAL: stale policydb latest_granting assignment remains")
-
-          # For this 6.6 kernel target, the current SukiSU implementation
-          # must update the SELinux status using the local seqno.
-          if s.count("selinux_status_update_policyload(seqno);") != 1:
-              raise SystemExit(
-                  "FATAL: expected one compatible "
-                  "selinux_status_update_policyload(seqno) call"
-              )
-
-          # Current SukiSU uses the selinux_policy pointer (pol), not
-          # policydb, for latest_granting in both policy-update paths.
-          if "pol->latest_granting = old_pol->latest_granting + 1;" not in s:
-              raise SystemExit(
-                  "FATAL: compatible pol->latest_granting assignment not found"
-              )
-
-          p.write_text(s)
-          print("SELinux rules compatibility check passed")
-          PY
-
-          echo "=== Verify SELinux rules ==="
-          grep -n 'selinux_status_update_policyload(seqno)' "$FILE"
-          grep -n 'pol->latest_granting = old_pol->latest_granting + 1' "$FILE"
-
-          if grep -nE 'seqno0|policydb->latest_granting = old_pol->latest_granting' "$FILE"; then
-            echo "FATAL: legacy SELinux code remains"
+          if grep -n 'seqno0' "$FILE"; then
+            echo "FATAL: stale seqno0 reference"
             exit 1
           fi
 
-          echo "SukiSU SELinux rules are compatible"
+          if grep -n \
+            'policydb->latest_granting = old_pol->latest_granting' \
+            "$FILE"; then
+            echo "FATAL: stale latest_granting assignment"
+            exit 1
+          fi
 
-      - name: Fix SukiSU Safe Mode
+          grep -q \
+            'pol->latest_granting = old_pol->latest_granting + 1' \
+            "$FILE"
+
+          echo "SELinux compatibility verified"
+      
+   
+      # ==========================================
+      # PRIORITY UID FILTER - compatibility fix
+      # ==========================================
+      - name: Configure PRIORITY_UID_FILTER
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
 
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          p = Path("KernelSU/kernel/runtime/ksud.c")
-          s = p.read_text()
+          root = Path("KernelSU")
+          if not root.is_dir():
+              raise SystemExit("FATAL: KernelSU directory missing")
 
-          # 1. Add a permanent decision state.
-          old = "static bool safe_mode_flag = false;"
-          new = """static bool safe_mode_flag = false;
-          static bool safe_mode_decided = false;"""
+          files = [
+              p for p in root.rglob("*")
+              if p.is_file()
+              and (p.name == "Kconfig" or p.name.startswith("Kconfig."))
+          ]
 
-          if s.count(old) != 1:
-              raise SystemExit("FATAL: safe_mode_flag anchor mismatch")
+          if not files:
+              raise SystemExit("FATAL: no KernelSU Kconfig files found")
 
-          s = s.replace(old, new, 1)
-
-          # 2. Replace safe mode decision logic.
-          start = s.index("bool ksu_is_safe_mode(void)")
-          end = s.index(
-              "static void vol_detector_event",
-              start
+          pattern = re.compile(
+              r"(?m)^config KSU_SUSFS_PRIORITY_UID_FILTER\s*$"
           )
 
-          old_func = s[start:end]
+          matches = []
+          susfs_matches = []
 
-          new_func = """bool ksu_is_safe_mode(void)
-          {
-              if (READ_ONCE(safe_mode_decided))
-                  return READ_ONCE(safe_mode_flag);
+          for p in files:
+              content = p.read_text(errors="replace")
+              if pattern.search(content):
+                  matches.append(p)
+              if re.search(r"(?m)^config KSU_SUSFS\s*$", content):
+                  susfs_matches.append(p)
 
-              /*
-               * Freeze the decision before unregistering the input hook.
-               * Later calls must never change the result.
-               */
-              WRITE_ONCE(safe_mode_decided, true);
+          if len(matches) > 1:
+              raise SystemExit(
+                  "FATAL: duplicate PRIORITY_UID_FILTER definitions: "
+                  + ", ".join(map(str, matches))
+              )
 
-              stop_input_hook();
+          if matches:
+              print("PRIORITY_UID_FILTER already defined:", matches[0])
+          else:
+              if len(susfs_matches) != 1:
+                  raise SystemExit(
+                      "FATAL: expected exactly one KSU_SUSFS definition, "
+                      f"found {len(susfs_matches)}"
+                  )
 
-              if (!READ_ONCE(safe_mode_flag))
-                  return false;
+              p = susfs_matches[0]
+              content = p.read_text()
 
-              pr_info("volume keys pressed max times, safe mode detected!\\n");
-              return true;
-          }
-
-          """
-
-          if "already_checked" not in old_func:
-              raise SystemExit("FATAL: unexpected safe mode implementation")
-
-          s = s[:start] + new_func + s[end:]
-
-          # 3. Ignore volume events after the decision or boot lifecycle.
-          old_event = """    static int vol_down_cnt = 0;
-
-              if (!value)"""
-
-          new_event = """    static int vol_down_cnt = 0;
-
-              if (READ_ONCE(safe_mode_decided) ||
-                  READ_ONCE(ksu_module_mounted) ||
-                  READ_ONCE(ksu_boot_completed))
-                  return;
-
-              if (!value)"""
-
-          if s.count(old_event) != 1:
-              raise SystemExit("FATAL: volume event anchor mismatch")
-
-          s = s.replace(old_event, new_event, 1)
-
-          p.write_text(s)
-
-          print("Safe mode patch applied successfully")
-          PY
-
-          echo "=== Verify safe mode patch ==="
-
-          grep -n -A22 'bool ksu_is_safe_mode' \
-            KernelSU/kernel/runtime/ksud.c
-
-          grep -n -A15 'static void vol_detector_event' \
-            KernelSU/kernel/runtime/ksud.c
-
-          grep -n 'safe_mode_decided' \
-            KernelSU/kernel/runtime/ksud.c
-
-      # ==========================================
-      # 6. PRIORITY UID FILTER
-      # ==========================================
-      - name: Patch SukiSU PRIORITY_UID_FILTER
-        working-directory: ${{ github.workspace }}/ws/common/KernelSU
-        run: |
-          set -euxo pipefail
-
-          KCONFIG=kernel/Kconfig
-
-          if grep -q '^config KSU_SUSFS_PRIORITY_UID_FILTER$' "$KCONFIG"; then
-            echo "PRIORITY_UID_FILTER already exists"
-          else
-            python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("kernel/Kconfig")
-          s = p.read_text()
-
-          menu = 'menu "KernelSU - SUSFS"'
-
-          if menu not in s:
-              raise SystemExit("FATAL: SUSFS menu not found")
-
-          start = s.index(menu)
-          end = s.find("\nendmenu", start)
-
-          if end < 0:
-              raise SystemExit("FATAL: SUSFS endmenu not found")
-
-          entry = """
+              entry = """
           config KSU_SUSFS_PRIORITY_UID_FILTER
               bool "Enable priority uid filter"
               depends on KSU_SUSFS
               default y
               help
-                Allow adding uid to priority filter list via pkg_observer strings.
-                Required by SukiSU builtin priority uid filter.
+                Enable priority UID filtering for SUSFS.
           """
 
-          s = s[:end] + "\n" + entry + s[end:]
-          p.write_text(s)
-          PY
-          fi
+              # Insert immediately before the enclosing endmenu.
+              start = content.find(
+                  "config KSU_SUSFS\n"
+              )
+              end = content.find("\nendmenu", start)
 
-          echo "=== Verify PRIORITY_UID_FILTER ==="
-          grep -A6 '^config KSU_SUSFS_PRIORITY_UID_FILTER$' "$KCONFIG"
+              if start < 0 or end < 0:
+                  raise SystemExit(
+                      "FATAL: cannot locate SUSFS menu boundaries"
+                  )
+
+              content = content[:end] + "\n" + entry + content[end:]
+              p.write_text(content)
+              print("Added PRIORITY_UID_FILTER to", p)
+
+          print("=== Final Kconfig definition ===")
+
+          for p in files:
+              content = p.read_text(errors="replace")
+              if pattern.search(content):
+                  print(p)
+                  for line in content.splitlines():
+                      if "KSU_SUSFS_PRIORITY_UID_FILTER" in line:
+                          print(line)
+
+          PY
+
+          echo "=== Verify configuration symbol ==="
+
+          grep -R -n -A6 \
+            '^config KSU_SUSFS_PRIORITY_UID_FILTER$' \
+            KernelSU --include='Kconfig*'
 
       
       # ==========================================
