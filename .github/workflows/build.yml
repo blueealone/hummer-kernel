@@ -1,13 +1,21 @@
-name: build-hummer-sukisu-builtin-susfs
+
+name: build-hummer-sukisu-builtin-new-susfs
 
 on:
   workflow_dispatch:
     inputs:
       enable_kpm:
-        description: "Try to build with KPM (automatically fallback if it fails)"
+        description: "Enable KPM; automatically retry without KPM if compilation fails"
         required: true
         type: boolean
         default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hummer-sukisu-builtin-new-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -21,38 +29,42 @@ jobs:
     env:
       KERNEL_BRANCH: "17.0"
       SUSFS_BRANCH: "gki-android15-6.6"
+      SUKISU_BRANCH: "builtin-new"
+      SUKISU_REPO: "https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
       LLVM_VERSION: "22.1.0"
 
     steps:
+
       # ==========================================
       # 1. Checkout
       # ==========================================
-      - name: Checkout device config
+
+      - name: Checkout device configuration
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           set -euxo pipefail
 
-          test -f device.config || {
-            echo "FATAL: device.config missing"
-            exit 1
-          }
+          test -f device.config
 
           sudo apt-get update
 
           sudo apt-get install -y \
             bc bison flex \
             libssl-dev libelf-dev \
-            dwarves zip git curl \
+            dwarves pahole \
+            zip git curl \
             xz-utils build-essential \
             python3 python3-pip \
             cpio rsync kmod \
-            pahole libncurses-dev
+            libncurses-dev \
+            lz4 zstd
 
       # ==========================================
       # 2. LLVM 22
       # ==========================================
+
       - name: Fetch LLVM toolchain
         run: |
           set -euxo pipefail
@@ -77,10 +89,12 @@ jobs:
 
           clang --version
           ld.lld --version
+          llvm-nm --version
 
       # ==========================================
       # 3. Kernel sources
       # ==========================================
+
       - name: Fetch kernel sources
         run: |
           set -euxo pipefail
@@ -89,16 +103,19 @@ jobs:
 
           git clone \
             --branch "$KERNEL_BRANCH" \
+            --single-branch \
             https://github.com/crdroidandroid/android_kernel_oneplus_sm8750 \
             ws/common
 
           git clone \
             --branch "$KERNEL_BRANCH" \
+            --single-branch \
             https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-modules \
             ws/sm8750-modules
 
           git clone \
             --branch "$KERNEL_BRANCH" \
+            --single-branch \
             https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-devicetrees \
             ws/sm8750-devicetrees
 
@@ -117,42 +134,51 @@ jobs:
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' \
             ws/common/Makefile
 
-          echo "=== Kernel source branch ==="
+          echo "=== Kernel branch ==="
 
           git -C ws/common branch --show-current
 
       # ==========================================
       # 4. SUSFS integration
       # ==========================================
+
       - name: Integrate SUSFS
+        working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
 
+          echo "=== Fetch SUSFS ==="
+
           git clone \
             --depth=1 \
+            --single-branch \
             --branch "$SUSFS_BRANCH" \
             https://gitlab.com/simonpunk/susfs4ksu.git \
-            ws/susfs
+            ../susfs
 
           echo "=== SUSFS version ==="
 
-          grep -m1 SUSFS_VERSION \
-            ws/susfs/kernel_patches/include/linux/susfs.h
+          grep -m1 'SUSFS_VERSION' \
+            ../susfs/kernel_patches/include/linux/susfs.h
 
-          cd ws/common
+          echo "=== SUSFS commit ==="
+
+          git -C ../susfs rev-parse HEAD
 
           # Copy SUSFS implementation
+
           cp ../susfs/kernel_patches/fs/susfs.c fs/
 
-          cp ../susfs/kernel_patches/include/linux/susfs.h \
-             ../susfs/kernel_patches/include/linux/susfs_def.h \
-             include/linux/
+          cp \
+            ../susfs/kernel_patches/include/linux/susfs.h \
+            ../susfs/kernel_patches/include/linux/susfs_def.h \
+            include/linux/
 
-          test -f fs/susfs.c
-          test -f include/linux/susfs.h
-          test -f include/linux/susfs_def.h
+          test -s fs/susfs.c
+          test -s include/linux/susfs.h
+          test -s include/linux/susfs_def.h
 
-          echo "=== Applying SUSFS patch ==="
+          echo "=== Apply SUSFS kernel patch ==="
 
           patch --batch -p1 --forward \
             < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
@@ -166,100 +192,221 @@ jobs:
             exit 1
           fi
 
-          echo "SUSFS integration completed"
+          echo "=== Verify SUSFS integration ==="
 
+          grep -q 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile
 
-      - name: Integrate SukiSU susfs-main
-        shell: bash
-        run: |
-          set -euxo pipefail
-          
-          REPO="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
+          grep -q 'susfs_is_avc_log_spoofing_enabled' \
+            security/selinux/avc.c
 
-          echo "=== Remote HEAD ==="
-          git ls-remote "$REPO" HEAD
+          grep -q 'susfs_ksu_sid' \
+            security/selinux/avc.c
 
-          echo "=== All remote branches ==="
-          git ls-remote --heads "$REPO"
+          grep -q 'susfs_priv_app_sid' \
+            security/selinux/avc.c
 
-          echo "=== Search susfs branches ==="
-          git ls-remote --heads "$REPO" | grep -i susfs || true
+          grep -q 'susfs_set_avc_log_spoofing' \
+            fs/susfs.c
 
-          echo "=== Exact branch ==="
-          git ls-remote --exit-code --heads "$REPO" \
-            refs/heads/susfs-main
-      
+          echo "SUSFS integration passed"
 
-      - name: Check Native AVC Spoofing
+      # ==========================================
+      # 5. SukiSU builtin-new
+      # ==========================================
+
+      - name: Integrate SukiSU builtin-new
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
 
-          echo "=== Check AVC spoofing symbols ==="
+          echo "=== Verify remote branch ==="
 
-          grep -R -n -E \
-            'susfs_is_avc_log_spoofing_enabled|susfs_ksu_sid|susfs_priv_app_sid|EnableAvcLogSpoofing' \
-            KernelSU/kernel fs security include || true
+          git ls-remote --exit-code --heads \
+            "$SUKISU_REPO" \
+            "refs/heads/$SUKISU_BRANCH"
 
-          echo "=== Check AVC implementation ==="
+          echo "=== Clone exact branch ==="
 
-          grep -n -A15 -B10 \
-            'susfs_is_avc_log_spoofing_enabled' \
-            security/selinux/avc.c || true
+          test ! -e KernelSU
 
-          echo "=== Check SUSFS implementation ==="
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "$SUKISU_BRANCH" \
+            "$SUKISU_REPO" \
+            KernelSU
 
-          grep -n -A10 -B5 \
-            'susfs_is_avc_log_spoofing_enabled' \
-            fs/susfs.c || true      
+          ACTUAL_BRANCH=$(git -C KernelSU branch --show-current)
+          ACTUAL_COMMIT=$(git -C KernelSU rev-parse HEAD)
 
-            
-         
+          echo "Branch: $ACTUAL_BRANCH"
+          echo "Commit: $ACTUAL_COMMIT"
+
+          test "$ACTUAL_BRANCH" = "$SUKISU_BRANCH"
+
+          echo "=== Verify branch Kconfig ==="
+
+          grep -q '^config KSU_SUSFS$' \
+            KernelSU/kernel/Kconfig
+
+          grep -q '^config KSU_SUSFS_INLINE_HOOK$' \
+            KernelSU/kernel/Kconfig
+
+          grep -q '^config KPM$' \
+            KernelSU/kernel/Kconfig
+
+          echo "=== Integrate into drivers ==="
+
+          test -d drivers
+          test -f drivers/Makefile
+          test -f drivers/Kconfig
+
+          test ! -e drivers/kernelsu
+          test ! -L drivers/kernelsu
+
+          ln -s ../KernelSU/kernel drivers/kernelsu
+
+          if ! grep -Fq \
+            'obj-$(CONFIG_KSU) += kernelsu/' \
+            drivers/Makefile; then
+
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' \
+              >> drivers/Makefile
+          fi
+
+          if ! grep -Fq \
+            'source "drivers/kernelsu/Kconfig"' \
+            drivers/Kconfig; then
+
+            python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("drivers/Kconfig")
+          data = p.read_text()
+
+          pos = data.rfind("endmenu")
+
+          if pos < 0:
+              raise SystemExit("FATAL: drivers/Kconfig endmenu missing")
+
+          entry = 'source "drivers/kernelsu/Kconfig"\n\n'
+
+          data = data[:pos] + entry + data[pos:]
+          p.write_text(data)
+          PY
+
+          fi
+
+          echo "=== Verify integration ==="
+
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+          test -f drivers/kernelsu/ksu.c
+
+          readlink -f drivers/kernelsu
+
+          grep -F \
+            'obj-$(CONFIG_KSU) += kernelsu/' \
+            drivers/Makefile
+
+          grep -F \
+            'source "drivers/kernelsu/Kconfig"' \
+            drivers/Kconfig
+
+          echo "SukiSU builtin-new integration passed"
+
       # ==========================================
-      # 5.1 Fix SukiSU SELinux compilation
+      # 6. SELinux compatibility
       # ==========================================
-      # ==========================================
-      # 5.1 Fix SukiSU SELinux rules (old + new source)
-      # ==========================================
-      - name: Verify SukiSU SELinux rules
+
+      - name: Verify SukiSU SELinux implementation
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -euxo pipefail
 
           FILE=KernelSU/kernel/selinux/rules.c
 
-          test -f "$FILE"
+          test -s "$FILE"
 
-          echo "=== SELinux policy compatibility ==="
+          echo "=== Verify policy update implementation ==="
 
-          grep -nE \
-            'selinux_status_update_policyload|latest_granting' \
+          grep -n \
+            'pol->latest_granting = old_pol->latest_granting + 1' \
             "$FILE"
+
+          echo "=== Verify SUSFS SID refresh ==="
+
+          grep -n \
+            'susfs_set_batch_sid' \
+            "$FILE"
+
+          echo "=== Reject stale compatibility code ==="
 
           if grep -n 'seqno0' "$FILE"; then
             echo "FATAL: stale seqno0 reference"
             exit 1
           fi
 
-          if grep -n \
-            'policydb->latest_granting = old_pol->latest_granting' \
-            "$FILE"; then
-            echo "FATAL: stale latest_granting assignment"
-            exit 1
-          fi
+          echo "SELinux implementation verified"
 
-          grep -q \
-            'pol->latest_granting = old_pol->latest_granting + 1' \
-            "$FILE"
+      # ==========================================
+      # 7. Native AVC spoofing
+      # ==========================================
 
-          echo "SELinux compatibility verified"
-      
-   
-      
-      
+      - name: Verify Native AVC Spoofing
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+
+          echo "=== Verify AVC implementation ==="
+
+          AVC=security/selinux/avc.c
+          SUSFS=fs/susfs.c
+          HEADER=include/linux/susfs.h
+          RULES=KernelSU/kernel/selinux/rules.c
+
+          test -s "$AVC"
+          test -s "$SUSFS"
+          test -s "$HEADER"
+          test -s "$RULES"
+
+          grep -n \
+            'susfs_is_avc_log_spoofing_enabled' \
+            "$AVC"
+
+          grep -n 'susfs_ksu_sid' "$AVC"
+          grep -n 'susfs_priv_app_sid' "$AVC"
+
+          echo "=== Verify static key ==="
+
+          grep -n \
+            'DEFINE_STATIC_KEY_FALSE(susfs_is_avc_log_spoofing_enabled)' \
+            "$SUSFS"
+
+          echo "=== Verify AVC control interface ==="
+
+          grep -n 'susfs_set_avc_log_spoofing' \
+            "$SUSFS"
+
+          grep -n 'susfs_set_avc_log_spoofing' \
+            "$HEADER"
+
+          echo "=== Verify SELinux SID refresh ==="
+
+          grep -n 'susfs_set_batch_sid' "$RULES"
+
+          echo "=== Verify manager command integration ==="
+
+          grep -R -n \
+            'susfs_set_avc_log_spoofing' \
+            KernelSU/kernel
+
+          echo "Native AVC Spoofing implementation verified"
+
       # ==========================================
-      # 7. Configure kernel
+      # 8. Configure kernel
       # ==========================================
+
       - name: Configure kernel
         working-directory: ${{ github.workspace }}/ws/common
         run: |
@@ -271,59 +418,68 @@ jobs:
 
           cp "${{ github.workspace }}/device.config" .config
 
-          echo "=== Remove conflicting definitions ==="
+          echo "=== Remove old SukiSU definitions ==="
 
-          for c in \
-          KSU \
-          KPM \
-          KSU_SUSFS \
-          DEBUG_KERNEL \
-          KALLSYMS \
-          KALLSYMS_ALL; do
+          sed -i -E \
+            '/^(CONFIG_(KSU|KPM)(_[A-Z0-9_]+)?=|# CONFIG_(KSU|KPM)(_[A-Z0-9_]+)? is not set)/d' \
+            .config
 
-            sed -i \
-              -e "/^CONFIG_${c}=/d" \
-              -e "/^# CONFIG_${c} is not set$/d" \
-              .config
-          done
-
-          echo "=== Enable required dependencies ==="
+          echo "=== Configure architecture and security ==="
 
           cat >> .config <<'EOF'
 
-          # ======================================
-          # Architecture and security
-          # ======================================
+          # Architecture
+          CONFIG_64BIT=y
+          CONFIG_ARM64=y
 
+          # Security
           CONFIG_SECURITY=y
           CONFIG_SECURITY_SELINUX=y
           CONFIG_EXT4_FS=y
 
-          # ======================================
-          # Kernel debugging and symbols
-          # ======================================
-
+          # Debugging and symbols
           CONFIG_DEBUG_KERNEL=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
 
-          # ======================================
           # SukiSU Ultra
-          # ======================================
-
           CONFIG_KSU=y
-          CONFIG_KPM=y
+          CONFIG_KSU_LSM_SECURITY_HOOKS=y
+          CONFIG_KSU_FEATURE_SULOG=y
+          CONFIG_KSU_FEATURE_ADBROOT=y
+          CONFIG_KSU_ENABLE_FULL_UID_CHECKS=y
 
-          # ======================================
-          # SUSFS
-          # ======================================
+          # KPM
+          EOF
 
+          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+            echo "CONFIG_KPM=y" >> .config
+          else
+            echo "# CONFIG_KPM is not set" >> .config
+          fi
+
+          cat >> .config <<'EOF'
+
+          # SUSFS core
           CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_INLINE_HOOK=y
+
+          # SUSFS features
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
           CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y
 
           EOF
 
-          # Avoid automatic git suffix changes
+          echo "=== Disable automatic git suffix ==="
+
           sed -i \
             's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' \
             .config
@@ -332,7 +488,7 @@ jobs:
 
           make olddefconfig
 
-          echo "=== Final configuration ==="
+          echo "=== Verify required configuration ==="
 
           for c in \
             64BIT \
@@ -343,8 +499,21 @@ jobs:
             KALLSYMS \
             KALLSYMS_ALL \
             KSU \
-            KPM \
+            KSU_LSM_SECURITY_HOOKS \
+            KSU_FEATURE_SULOG \
+            KSU_FEATURE_ADBROOT \
+            KSU_ENABLE_FULL_UID_CHECKS \
             KSU_SUSFS \
+            KSU_SUSFS_INLINE_HOOK \
+            KSU_SUSFS_SUS_PATH \
+            KSU_SUSFS_SUS_MOUNT \
+            KSU_SUSFS_SUS_KSTAT \
+            KSU_SUSFS_SPOOF_UNAME \
+            KSU_SUSFS_ENABLE_LOG \
+            KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            KSU_SUSFS_OPEN_REDIRECT \
+            KSU_SUSFS_SUS_MAP \
             KSU_SUSFS_PRIORITY_UID_FILTER; do
 
             if ! grep -qx "CONFIG_${c}=y" .config; then
@@ -360,19 +529,29 @@ jobs:
             echo "OK: CONFIG_${c}=y"
           done
 
-          echo "=== Verify KPM dependencies ==="
+          echo "=== Verify KPM configuration ==="
 
-          grep -E \
-            '^CONFIG_(KSU|KPM|64BIT|KALLSYMS|KALLSYMS_ALL|DEBUG_KERNEL)=y$' \
-            .config
+          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+            grep -qx 'CONFIG_KPM=y' .config
+            echo "KPM requested and enabled"
+          else
+            ! grep -qx 'CONFIG_KPM=y' .config
+            echo "KPM disabled by request"
+          fi
 
-          echo "=== Verify SUSFS configuration ==="
+          echo "=== Verify SukiSU hook backend ==="
 
-          grep -E \
-            '^CONFIG_KSU_SUSFS.*=y$' \
-            .config || true
+          grep -qx 'CONFIG_KSU_SUSFS=y' .config
+          grep -qx 'CONFIG_KSU_SUSFS_INLINE_HOOK=y' .config
 
-          echo "=== Verify KPROBES status ==="
+          if grep -qx 'CONFIG_KSU_KPROBES_KSUD=y' .config; then
+            echo "FATAL: KSU Kprobes backend unexpectedly enabled"
+            exit 1
+          fi
+
+          echo "SUSFS inline hook backend selected"
+
+          echo "=== Global KPROBES status ==="
 
           grep -E \
             '^CONFIG_KPROBES=|^# CONFIG_KPROBES is not set' \
@@ -383,8 +562,9 @@ jobs:
           make -s kernelrelease
 
       # ==========================================
-      # 8. Kernel source compatibility
+      # 9. Kernel compatibility
       # ==========================================
+
       - name: Check kernel compatibility
         working-directory: ${{ github.workspace }}/ws/common
         run: |
@@ -413,19 +593,20 @@ jobs:
           grep -R -n 'struct lsm_blob_sizes' \
             include/linux security/selinux || true
 
-          echo "=== Kernel source commit ==="
+          echo "=== Kernel commit ==="
 
           git log -1 --format='%H%n%ci%n%s'
 
-          echo "=== Kernel configuration ==="
+          echo "=== Kernel config ==="
 
           grep -E \
-            'CONFIG_(KSU|KPM|KSU_SUSFS|KALLSYMS_ALL)=' \
+            '^CONFIG_(KSU|KPM|KSU_SUSFS|KSU_SUSFS_INLINE_HOOK|KALLSYMS_ALL)=' \
             .config
 
       # ==========================================
-      # 9. Headers
+      # 10. Install headers
       # ==========================================
+
       - name: Install headers
         working-directory: ${{ github.workspace }}/ws/common
         run: |
@@ -442,8 +623,9 @@ jobs:
           echo "UAPI headers installed"
 
       # ==========================================
-      # 10. Build Image
+      # 11. Build kernel Image
       # ==========================================
+
       - name: Build kernel Image
         working-directory: ${{ github.workspace }}/ws/common
         run: |
@@ -463,14 +645,21 @@ jobs:
           echo "KPM requested: ${{ inputs.enable_kpm }}"
 
           if make -j"$JOBS" Image; then
+
             echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
-            echo "KPM_STATUS=ENABLED" >> "$GITHUB_ENV"
+
+            if grep -qx 'CONFIG_KPM=y' .config; then
+              echo "KPM_STATUS=ENABLED" >> "$GITHUB_ENV"
+            else
+              echo "KPM_STATUS=DISABLED_BY_REQUEST" >> "$GITHUB_ENV"
+            fi
 
           else
-            echo "Initial build failed"
+
+            echo "Initial kernel build failed"
 
             if [ "${{ inputs.enable_kpm }}" != "true" ]; then
-              echo "KPM fallback not requested"
+              echo "FATAL: build failed without KPM"
               exit 1
             fi
 
@@ -480,7 +669,7 @@ jobs:
 
             sed -i \
               -e '/^CONFIG_KPM=/d' \
-              -e '/^# CONFIG_KPM is not set/d' \
+              -e '/^# CONFIG_KPM is not set$/d' \
               .config
 
             echo "# CONFIG_KPM is not set" >> .config
@@ -492,8 +681,11 @@ jobs:
               exit 1
             fi
 
-            # Clean partial objects but preserve configuration
+            echo "=== Clean partial objects ==="
+
             make clean
+
+            echo "=== Rebuild without KPM ==="
 
             if ! make -j"$JOBS" Image; then
               echo "FATAL: kernel build failed without KPM"
@@ -502,17 +694,19 @@ jobs:
 
             echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
             echo "KPM_STATUS=DISABLED_FALLBACK" >> "$GITHUB_ENV"
+
           fi
 
           test -s arch/arm64/boot/Image
 
           echo "=== Image size ==="
+
           ls -lh arch/arm64/boot/Image
 
-      
       # ==========================================
-      # 11. Verify kernel features
+      # 12. Verify kernel features
       # ==========================================
+
       - name: Verify kernel features
         working-directory: ${{ github.workspace }}/ws/common
         run: |
@@ -532,6 +726,7 @@ jobs:
           echo "================================"
 
           echo "=== Kernel release ==="
+
           make -s kernelrelease
 
           echo "=== Required configurations ==="
@@ -545,7 +740,18 @@ jobs:
             KALLSYMS \
             KALLSYMS_ALL \
             KSU \
+            KSU_LSM_SECURITY_HOOKS \
             KSU_SUSFS \
+            KSU_SUSFS_INLINE_HOOK \
+            KSU_SUSFS_SUS_PATH \
+            KSU_SUSFS_SUS_MOUNT \
+            KSU_SUSFS_SUS_KSTAT \
+            KSU_SUSFS_SPOOF_UNAME \
+            KSU_SUSFS_ENABLE_LOG \
+            KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            KSU_SUSFS_OPEN_REDIRECT \
+            KSU_SUSFS_SUS_MAP \
             KSU_SUSFS_PRIORITY_UID_FILTER; do
 
             grep -qx "CONFIG_${c}=y" .config || {
@@ -561,47 +767,64 @@ jobs:
           if grep -qx 'CONFIG_KPM=y' .config; then
             echo "KPM ENABLED"
           else
-            echo "KPM DISABLED (fallback)"
+            echo "KPM DISABLED"
           fi
 
-          echo "=== SUSFS objects ==="
+          echo "=== SUSFS object ==="
 
           test -s fs/susfs.o
+
           echo "OK: fs/susfs.o"
 
-          echo "=== KernelSU objects ==="
+          echo "=== SukiSU object ==="
 
-          test -d drivers/kernelsu
+          test -s drivers/kernelsu/kernelsu.o
 
-          find drivers/kernelsu \
-            -name '*.o' \
-            -type f | head -30
+          echo "OK: drivers/kernelsu/kernelsu.o"
+
+          echo "=== Native AVC implementation ==="
+
+          grep -q \
+            'susfs_is_avc_log_spoofing_enabled' \
+            security/selinux/avc.c
+
+          grep -q \
+            'susfs_set_avc_log_spoofing' \
+            fs/susfs.c
+
+          grep -q \
+            'susfs_set_batch_sid' \
+            KernelSU/kernel/selinux/rules.c
+
+          echo "OK: Native AVC source integration"
+
+          echo "=== Compiled AVC symbols ==="
+
+          llvm-nm -a vmlinux | grep -E \
+            'susfs_set_avc_log_spoofing|susfs_is_avc_log_spoofing_enabled|susfs_ksu_sid|susfs_priv_app_sid'
 
           echo "=== SUSFS symbols ==="
 
-          nm -a vmlinux | grep -E \
+          llvm-nm -a vmlinux | grep -E \
             'susfs_parse_priority_app_strings|susfs_set_priority_uid_filter|susfs_add_sus_path' \
             || true
 
           echo "=== Kernel image ==="
 
           file "$IMG"
+
           ls -lh "$IMG"
+
           sha256sum "$IMG"
-
-          echo "=== Kernel config summary ==="
-
-          grep -E \
-            '^CONFIG_(64BIT|SECURITY|SECURITY_SELINUX|EXT4_FS|DEBUG_KERNEL|KALLSYMS|KALLSYMS_ALL|KSU|KPM|KSU_SUSFS.*)=y$' \
-            .config
 
           echo "=== Verification completed ==="
 
       # ==========================================
-      # 12. Build information
+      # 13. Generate build information
       # ==========================================
+
       - name: Generate build information
-        working-directory: ${{ github.workspace }}/ws/common
+        working-directory: ${{ github.workspace }}
         run: |
           set -euxo pipefail
 
@@ -609,37 +832,54 @@ jobs:
           export ARCH=arm64
           export LLVM=1
 
-          cd "${{ github.workspace }}"
-
           {
             echo "Device: hummer / PKR110"
             echo "ROM: crDroid 13.1"
             echo "Android: 17"
+
             echo "Kernel branch: $KERNEL_BRANCH"
-            echo "Kernel release: $(make -s -C ws/common kernelrelease)"
             echo "Kernel commit: $(git -C ws/common rev-parse HEAD)"
+            echo "Kernel release: $(make -s -C ws/common kernelrelease)"
+
+            echo "SukiSU branch: $SUKISU_BRANCH"
+            echo "SukiSU commit: $(git -C ws/common/KernelSU rev-parse HEAD)"
+
+            echo "SUSFS branch: $SUSFS_BRANCH"
+            echo "SUSFS commit: $(git -C ws/susfs rev-parse HEAD)"
+
+            grep -m1 'SUSFS_VERSION' \
+              ws/common/include/linux/susfs.h
+
             echo "Modules commit: $(git -C ws/sm8750-modules rev-parse HEAD)"
             echo "Devicetree commit: $(git -C ws/sm8750-devicetrees rev-parse HEAD)"
-            echo "SukiSU commit: $(git -C ws/common/KernelSU rev-parse HEAD)"
-            echo "SUSFS branch: $SUSFS_BRANCH"
+
             echo "LLVM: $LLVM_VERSION"
             echo "KPM status: $KPM_STATUS"
             echo "Build: $KERNEL_BUILD"
+
             echo "Date UTC: $(date -u)"
             echo ""
-            echo "=== Kernel config ==="
-            grep -E '^CONFIG_(KSU|KPM|KSU_SUSFS|KALLSYMS_ALL)=' \
+
+            echo "=== Kernel configuration ==="
+
+            grep -E \
+              '^CONFIG_(KSU|KPM|KSU_SUSFS|KSU_SUSFS_INLINE_HOOK|KSU_SUSFS_.*|KALLSYMS_ALL)=' \
               ws/common/.config || true
+
             echo ""
+
             echo "=== Image SHA256 ==="
+
             sha256sum ws/common/arch/arm64/boot/Image
+
           } > BUILD-INFO.txt
 
           cat BUILD-INFO.txt
 
       # ==========================================
-      # 13. Package AnyKernel3
+      # 14. Package AnyKernel3
       # ==========================================
+
       - name: Package AnyKernel3
         run: |
           set -euxo pipefail
@@ -653,7 +893,8 @@ jobs:
 
           cd ak3
 
-          # Device identification
+          echo "=== Device identification ==="
+
           sed -i \
             's/^device.name1=.*/device.name1=hummer/' \
             anykernel.sh
@@ -674,37 +915,41 @@ jobs:
             's/^device.name5=.*/device.name5=/' \
             anykernel.sh
 
-          # Boot partition
+          echo "=== Boot partition ==="
+
           sed -i \
             's|^BLOCK=.*|BLOCK=/dev/block/by-name/boot;|' \
             anykernel.sh
 
-          # A/B device
+          echo "=== A/B device ==="
+
           sed -i \
             's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' \
             anykernel.sh
 
-          # Remove repository metadata
+          echo "=== Remove repository metadata ==="
+
           rm -rf .git
 
           zip -r9 \
-            "${{ github.workspace }}/AK3-hummer-builtin-susfs.zip" \
+            "${{ github.workspace }}/AK3-hummer-builtin-new-susfs.zip" \
             .
 
           cd "${{ github.workspace }}"
 
-          ls -lh AK3-hummer-builtin-susfs.zip
+          ls -lh AK3-hummer-builtin-new-susfs.zip
 
       # ==========================================
-      # 14. Upload
+      # 15. Upload artifacts
       # ==========================================
+
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: AK3-hummer-crDroid13.1-builtin-susfs
+          name: AK3-hummer-crDroid13.1-builtin-new-susfs
           path: |
-            AK3-hummer-builtin-susfs.zip
+            AK3-hummer-builtin-new-susfs.zip
             BUILD-INFO.txt
           if-no-files-found: warn
           compression-level: 0
