@@ -168,7 +168,7 @@ jobs:
 
           echo "SUSFS integration completed"
 
-            # ==========================================
+      # ==========================================
       # 5. SukiSU builtin
       # ==========================================
       - name: Integrate SukiSU builtin
@@ -217,7 +217,11 @@ jobs:
           echo "=== ksud.h ==="
           cat KernelSU/kernel/runtime/ksud.h
 
-      
+      - name: Inject AVC Log Spoofing
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+         python3 ${{ github.workspace }}/patch_avc.py
+         
       # ==========================================
       # 5.1 Fix SukiSU SELinux compilation
       # ==========================================
