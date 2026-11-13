@@ -853,7 +853,7 @@ jobs:
           grep -n '^CFLAGS +=' "$KP_MAKEFILE"
 
           echo "=== Clean previous build ==="
-          make -C "$KP/kernel" clean
+          make -C "$KP/kernel" clean TARGET_COMPILE=aarch64-linux-gnu-
 
           echo "=== Build ARM64 kpimg ==="
 
