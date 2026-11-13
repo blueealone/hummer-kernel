@@ -225,6 +225,9 @@ jobs:
       # ==========================================
       # 5.1 Fix SukiSU SELinux compilation
       # ==========================================
+      # ==========================================
+      # 5.1 Fix SukiSU SELinux rules (old + new source)
+      # ==========================================
       - name: Fix SukiSU SELinux rules
         working-directory: ${{ github.workspace }}/ws/common
         run: |
@@ -233,8 +236,8 @@ jobs:
           FILE="KernelSU/kernel/selinux/rules.c"
           test -f "$FILE"
 
-          echo "=== Before patch ==="
-          grep -nE 'seqno0|policydb->latest_granting' "$FILE" || true
+          echo "=== SELinux rules source before compatibility patch ==="
+          grep -nE 'selinux_status_update_policyload|latest_granting' "$FILE" || true
 
           python3 - <<'PY'
           from pathlib import Path
@@ -242,45 +245,72 @@ jobs:
           p = Path("KernelSU/kernel/selinux/rules.c")
           s = p.read_text()
 
-          fixes = {
-              "selinux_status_update_policyload(seqno0);":
-              "selinux_status_update_policyload(seqno);",
+          # SukiSU changed rules.c upstream. Apply only the two legacy
+          # compatibility fixes when their old expressions are present.
+          # If upstream has already incorporated a fix, leave it untouched.
+          fixes = (
+              (
+                  "selinux_status_update_policyload(seqno0);",
+                  "selinux_status_update_policyload(seqno);",
+              ),
+              (
+                  "policydb->latest_granting = old_pol->latest_granting + 1;",
+                  "pol->latest_granting = old_pol->latest_granting + 1;",
+              ),
+          )
 
-              "policydb->latest_granting = old_pol->latest_granting + 1;":
-              "pol->latest_granting = old_pol->latest_granting + 1;",
-          }
-
-          for old, new in fixes.items():
+          for old, new in fixes:
               count = s.count(old)
 
-              if count != 1:
+              if count > 1:
                   raise SystemExit(
-                      f"FATAL: expected exactly one occurrence, "
-                      f"found {count}: {old}"
+                      f"FATAL: ambiguous legacy SELinux expression "
+                      f"({count} occurrences): {old}"
                   )
 
-              s = s.replace(old, new, 1)
-              print(f"FIXED: {old} -> {new}")
+              if count == 1:
+                  s = s.replace(old, new, 1)
+                  print(f"PATCHED: {old} -> {new}")
+              else:
+                  print(f"ALREADY UPDATED upstream: {old}")
+
+          # Do not silently accept an unknown/incompatible rules.c layout.
+          if "seqno0" in s:
+              raise SystemExit("FATAL: stale seqno0 reference remains")
+
+          if "policydb->latest_granting = old_pol->latest_granting + 1;" in s:
+              raise SystemExit("FATAL: stale policydb latest_granting assignment remains")
+
+          # For this 6.6 kernel target, the current SukiSU implementation
+          # must update the SELinux status using the local seqno.
+          if s.count("selinux_status_update_policyload(seqno);") != 1:
+              raise SystemExit(
+                  "FATAL: expected one compatible "
+                  "selinux_status_update_policyload(seqno) call"
+              )
+
+          # Current SukiSU uses the selinux_policy pointer (pol), not
+          # policydb, for latest_granting in both policy-update paths.
+          if "pol->latest_granting = old_pol->latest_granting + 1;" not in s:
+              raise SystemExit(
+                  "FATAL: compatible pol->latest_granting assignment not found"
+              )
 
           p.write_text(s)
+          print("SELinux rules compatibility check passed")
           PY
 
-          echo "=== Verify patch ==="
-
-          if grep -nE 'seqno0|policydb->latest_granting' "$FILE"; then
-            echo "FATAL: old code still exists"
-            exit 1
-          fi
-
+          echo "=== Verify SELinux rules ==="
           grep -n 'selinux_status_update_policyload(seqno)' "$FILE"
           grep -n 'pol->latest_granting = old_pol->latest_granting + 1' "$FILE"
 
-          echo "SukiSU SELinux fixes applied successfully"
+          if grep -nE 'seqno0|policydb->latest_granting = old_pol->latest_granting' "$FILE"; then
+            echo "FATAL: legacy SELinux code remains"
+            exit 1
+          fi
 
-                # ==========================================
+          echo "SukiSU SELinux rules are compatible"
 
-      # 5.2 Fix SukiSU Safe Mode false positive
-      # ==========================================
       - name: Fix SukiSU Safe Mode
         working-directory: ${{ github.workspace }}/ws/common
         run: |
