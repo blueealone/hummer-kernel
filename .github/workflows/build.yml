@@ -837,8 +837,8 @@ jobs:
           s = p.read_text()
 
           old = "CFLAGS += -Wall -fno-builtin -std=gnu11 -nostdinc -mgeneral-regs-only -ffixed-x18"
-          new = old + " -fno-stack-protector"
-
+          new = old + " -fno-stack-protector -fno-pic -fno-PIE"
+          
           if new in s:
               print("Already fixed")
           elif s.count(old) == 1:
