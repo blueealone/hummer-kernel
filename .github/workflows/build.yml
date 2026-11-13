@@ -180,7 +180,7 @@ jobs:
             https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh \
             -o /tmp/sukisu-setup.sh
 
-          bash /tmp/sukisu-setup.sh builtin
+          bash /tmp/sukisu-setup.sh susfs-main
 
           test -d KernelSU
           test -f drivers/kernelsu/Kconfig
