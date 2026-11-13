@@ -1176,8 +1176,12 @@ jobs:
             https://github.com/osm0sis/AnyKernel3 \
             ak3
 
-          cp ws/common/arch/arm64/boot/Image ak3/Image
-
+          if [ "$KPM_STATUS" = "ENABLED" ] && [ -s ws/common/arch/arm64/boot/Image.kpm ]; then
+            cp ws/common/arch/arm64/boot/Image.kpm ak3/Image
+          else
+            cp ws/common/arch/arm64/boot/Image ak3/Image
+          fi
+          
           cd ak3
 
           echo "=== Device identification ==="
