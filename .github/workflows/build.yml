@@ -595,9 +595,6 @@ jobs:
           KALLSYMS_ALL \
           KSU \
           KSU_LSM_SECURITY_HOOKS \
-          KSU_FEATURE_SULOG \
-          KSU_FEATURE_ADBROOT \
-          KSU_ENABLE_FULL_UID_CHECKS \
           KSU_SUSFS \
           KSU_SUSFS_INLINE_HOOK \
           KSU_SUSFS_SUS_PATH \
@@ -622,6 +619,39 @@ jobs:
           fi
 
           echo "OK: CONFIG_${c}=y"
+          done
+
+          echo "=== Verify branch-optional SukiSU features ==="
+
+          # SULOG / ADBROOT / FULL_UID_CHECKS 是分支相关选项。
+          # builtin-new 分支的 Kconfig 里没有 KSU_FEATURE_SULOG
+          # （已核实: 只有 ADBROOT 和 FULL_UID_CHECKS）。
+          # 因此: Kconfig 有 -> 严格校验; 没有 -> 放行，不影响 SUSFS/AVC 链路。
+          KSU_KCONFIG=KernelSU/kernel/Kconfig
+
+          if [ ! -f "$KSU_KCONFIG" ]; then
+            echo "FATAL: $KSU_KCONFIG not found, cannot verify SukiSU options"
+            exit 1
+          fi
+
+          for c in KSU_FEATURE_SULOG KSU_FEATURE_ADBROOT KSU_ENABLE_FULL_UID_CHECKS; do
+
+            if grep -qE "^config[[:space:]]+${c}[[:space:]]*$" "$KSU_KCONFIG"; then
+
+              if ! grep -qx "CONFIG_${c}=y" .config; then
+                echo "FATAL: CONFIG_${c} declared in Kconfig but not enabled"
+                grep -E "^CONFIG_${c}=|^# CONFIG_${c} is not set" .config || true
+                exit 1
+              fi
+
+              echo "OK: CONFIG_${c}=y (declared)"
+
+            else
+
+              echo "SKIP: ${c} not in this branch Kconfig (compiled out, SUSFS/AVC unaffected)"
+
+            fi
+
           done
 
           echo "=== Verify container configuration ==="
