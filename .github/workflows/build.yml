@@ -1,4 +1,3 @@
-
 name: build-hummer-sukisu-builtin-new-susfs
 
 on:
@@ -32,8 +31,6 @@ jobs:
       SUKISU_BRANCH: "builtin-new"
       SUKISU_REPO: "https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
       LLVM_VERSION: "22.1.0"
-      KPM_REPO: "https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch.git"
-      KPM_BRANCH: "main"
 
     steps:
 
@@ -53,42 +50,15 @@ jobs:
           sudo apt-get update
 
           sudo apt-get install -y \
-            bc \
-            bison \
-            flex \
-            libssl-dev \
-            libelf-dev \
-            dwarves \
-            pahole \
-            zip \
-            git \
-            curl \
-            wget \
-            xz-utils \
-            build-essential \
-            python3 \
-            python3-pip \
-            python3-venv \
-            cpio \
-            rsync \
-            kmod \
+            bc bison flex \
+            libssl-dev libelf-dev \
+            dwarves pahole \
+            zip git curl \
+            xz-utils build-essential \
+            python3 python3-pip \
+            cpio rsync kmod \
             libncurses-dev \
-            lz4 \
-            zstd \
-            gcc-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu \
-            zlib1g-dev \
-            cmake \
-            ninja-build \
-            pkg-config \
-            libz-dev \
-            liblz4-dev \
-            libzstd-dev \
-            libssl-dev \
-            clang \
-            llvm \
-            file \
-            xxd
+            lz4 zstd
 
       # ==========================================
       # 2. LLVM 22
@@ -166,42 +136,6 @@ jobs:
           echo "=== Kernel branch ==="
 
           git -C ws/common branch --show-current
-
-          
-      # ==========================================
-      # 3.5. KernelPatch sources
-      # ==========================================
-
-      - name: Fetch KernelPatch sources
-        run: |
-          set -euxo pipefail
-
-          git clone \
-            --depth=1 \
-            --single-branch \
-            --branch "$KPM_BRANCH" \
-            "$KPM_REPO" \
-            ws/kernelpatch
-
-          echo "=== KernelPatch commit ==="
-
-          git -C ws/kernelpatch rev-parse HEAD
-
-          echo "=== Verify KPM ABI v2 ==="
-
-          grep -q \
-            'SUKISU_KPM_ABI_VERSION 2' \
-            ws/kernelpatch/kernel/patch/sukisu/supercall.h
-
-          grep -q \
-            'SUKISU_KPM_SUPERCALL_MAGIC2' \
-            ws/kernelpatch/kernel/patch/sukisu/supercall.h
-
-          test -s ws/kernelpatch/kernel/Makefile
-          test -s ws/kernelpatch/tools/Makefile
-          test -s ws/kernelpatch/patch/main.cpp
-
-          echo "KernelPatch sources verified"
 
 
       # ==========================================
@@ -469,6 +403,7 @@ jobs:
 
           echo "Native AVC Spoofing implementation verified"
 
+
       # ==========================================
       # 8. Configure kernel
       # ==========================================
@@ -490,17 +425,21 @@ jobs:
             '/^(CONFIG_(KSU|KPM)(_[A-Z0-9_]+)?=|# CONFIG_(KSU|KPM)(_[A-Z0-9_]+)? is not set)/d' \
             .config
 
-          echo "=== Configure architecture and security ==="
+          echo "=== Write base + container configuration ==="
 
-          cat >> .config <<'EOF'
-
+          cat >> .config <<'CFG_BASE_EOF'
           # Architecture
           CONFIG_64BIT=y
           CONFIG_ARM64=y
 
-          # Security
+          # Security: keep SELinux compiled in, default to permissive.
+          # Do NOT set CONFIG_SECURITY_SELINUX_DISABLE=y: init will panic on boot.
+          # Do NOT remove CONFIG_SECCOMP*: runc/containerd require them.
           CONFIG_SECURITY=y
           CONFIG_SECURITY_SELINUX=y
+          CONFIG_SECURITY_SELINUX_BOOTPARAM=y
+          CONFIG_SECURITY_SELINUX_BOOTPARAM_VALUE=0
+          CONFIG_SECURITY_SELINUX_DEVELOP=y
           CONFIG_EXT4_FS=y
 
           # Debugging and symbols
@@ -508,23 +447,107 @@ jobs:
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
 
+          # ==========================================
+          # Container runtime support (Droidspaces / Docker / podman)
+          # ==========================================
+          # Namespaces
+          CONFIG_NAMESPACES=y
+          CONFIG_UTS_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_PID_NS=y
+          CONFIG_NET_NS=y
+          CONFIG_USER_NS=y
+
+          # SysV IPC / POSIX MQ
+          CONFIG_SYSVIPC=y
+          CONFIG_SYSVIPC_SYSCTL=y
+          CONFIG_POSIX_MQUEUE=y
+
+          # devtmpfs (harness for /dev inside containers)
+          CONFIG_DEVTMPFS=y
+          CONFIG_DEVTMPFS_MOUNT=y
+
+          # cgroups core
+          CONFIG_CGROUPS=y
+          CONFIG_CGROUP_SCHED=y
+          CONFIG_CGROUP_PIDS=y
+          CONFIG_CGROUP_FREEZER=y
+          CONFIG_CGROUP_DEVICE=y
+          CONFIG_CGROUP_CPUACCT=y
+          CONFIG_CGROUP_BPF=y
+          CONFIG_MEMCG=y
+          CONFIG_CPUSETS=y
+          CONFIG_BLK_CGROUP=y
+          CONFIG_CGROUP_WRITEBACK=y
+
+          # CPU bandwidth (fixes "限制 CPU" grey toggle)
+          CONFIG_CFS_BANDWIDTH=y
+          CONFIG_FAIR_GROUP_SCHED=y
+          CONFIG_RT_GROUP_SCHED=y
+
+          # seccomp (required by runc/containerd)
+          CONFIG_SECCOMP=y
+          CONFIG_SECCOMP_FILTER=y
+
+          # overlayfs (container image layers)
+          CONFIG_OVERLAY_FS=y
+          CONFIG_OVERLAY_FS_REDIRECT_DIR=y
+          CONFIG_OVERLAY_FS_INDEX=y
+
+          # tmpfs / shm
+          CONFIG_TMPFS=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_SHMEM=y
+
+          # container networking: veth/bridge/netfilter
+          CONFIG_VETH=y
+          CONFIG_BRIDGE=y
+          CONFIG_BRIDGE_NETFILTER=y
+          CONFIG_NETFILTER=y
+          CONFIG_NETFILTER_ADVANCED=y
+          CONFIG_NF_CONNTRACK=y
+          CONFIG_NF_NAT=y
+          CONFIG_NF_TABLES=y
+          CONFIG_NETFILTER_XTABLES=y
+
+          # IPv4 NAT
+          CONFIG_IP_NF_IPTABLES=y
+          CONFIG_IP_NF_FILTER=y
+          CONFIG_IP_NF_NAT=y
+          CONFIG_IP_NF_TARGET_MASQUERADE=y
+          CONFIG_IP_NF_MANGLE=y
+
+          # IPv6 NAT (fixes the IPv6 NAT grey notice)
+          CONFIG_IPV6=y
+          CONFIG_IP6_NF_IPTABLES=y
+          CONFIG_IP6_NF_FILTER=y
+          CONFIG_IP6_NF_NAT=y
+          CONFIG_IP6_NF_TARGET_MASQUERADE=y
+          CONFIG_IP6_NF_MANGLE=y
+
+          # filesystems commonly used by containers
+          CONFIG_EXT4_FS_POSIX_ACL=y
+          CONFIG_EXT4_FS_SECURITY=y
+          CONFIG_FUSE_FS=y
+          CONFIG_SQUASHFS=y
+          CONFIG_SQUASHFS_XATTR=y
+
+          # misc container helpers
+          CONFIG_CONFIGFS_FS=y
+          CONFIG_SECURITYFS=y
+          CONFIG_KEYS=y
+          CFG_BASE_EOF
+
+          echo "=== Write SukiSU configuration ==="
+
+          cat >> .config <<'CFG_KSU_EOF'
           # SukiSU Ultra
           CONFIG_KSU=y
           CONFIG_KSU_LSM_SECURITY_HOOKS=y
           CONFIG_KSU_FEATURE_SULOG=y
           CONFIG_KSU_FEATURE_ADBROOT=y
           CONFIG_KSU_ENABLE_FULL_UID_CHECKS=y
-
-          # KPM
-          EOF
-
-          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-            echo "CONFIG_KPM=y" >> .config
-          else
-            echo "# CONFIG_KPM is not set" >> .config
-          fi
-
-          cat >> .config <<'EOF'
 
           # SUSFS core
           CONFIG_KSU_SUSFS=y
@@ -541,8 +564,15 @@ jobs:
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
           CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y
+          CFG_KSU_EOF
 
-          EOF
+          echo "=== KPM toggle ==="
+
+          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+            echo "CONFIG_KPM=y" >> .config
+          else
+            echo "# CONFIG_KPM is not set" >> .config
+          fi
 
           echo "=== Disable automatic git suffix ==="
 
@@ -553,56 +583,122 @@ jobs:
           echo "=== Resolve Kconfig dependencies ==="
 
           make olddefconfig
-
-          echo "=== Verify required configuration ==="
+          echo "=== Verify required base + SukiSU configuration ==="
 
           for c in \
-            64BIT \
-            SECURITY \
-            SECURITY_SELINUX \
-            EXT4_FS \
-            DEBUG_KERNEL \
-            KALLSYMS \
-            KALLSYMS_ALL \
-            KSU \
-            KSU_LSM_SECURITY_HOOKS \
-            KSU_FEATURE_SULOG \
-            KSU_FEATURE_ADBROOT \
-            KSU_ENABLE_FULL_UID_CHECKS \
-            KSU_SUSFS \
-            KSU_SUSFS_INLINE_HOOK \
-            KSU_SUSFS_SUS_PATH \
-            KSU_SUSFS_SUS_MOUNT \
-            KSU_SUSFS_SUS_KSTAT \
-            KSU_SUSFS_SPOOF_UNAME \
-            KSU_SUSFS_ENABLE_LOG \
-            KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-            KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            KSU_SUSFS_OPEN_REDIRECT \
-            KSU_SUSFS_SUS_MAP \
-            KSU_SUSFS_PRIORITY_UID_FILTER; do
+          64BIT \
+          SECURITY \
+          SECURITY_SELINUX \
+          EXT4_FS \
+          DEBUG_KERNEL \
+          KALLSYMS \
+          KALLSYMS_ALL \
+          KSU \
+          KSU_LSM_SECURITY_HOOKS \
+          KSU_FEATURE_SULOG \
+          KSU_FEATURE_ADBROOT \
+          KSU_ENABLE_FULL_UID_CHECKS \
+          KSU_SUSFS \
+          KSU_SUSFS_INLINE_HOOK \
+          KSU_SUSFS_SUS_PATH \
+          KSU_SUSFS_SUS_MOUNT \
+          KSU_SUSFS_SUS_KSTAT \
+          KSU_SUSFS_SPOOF_UNAME \
+          KSU_SUSFS_ENABLE_LOG \
+          KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+          KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+          KSU_SUSFS_OPEN_REDIRECT \
+          KSU_SUSFS_SUS_MAP \
+          KSU_SUSFS_PRIORITY_UID_FILTER; do
 
-            if ! grep -qx "CONFIG_${c}=y" .config; then
-              echo "FATAL: CONFIG_${c} is not enabled"
+          if ! grep -qx "CONFIG_${c}=y" .config; then
+          echo "FATAL: CONFIG_${c} is not enabled"
 
-              grep -E \
-                "^CONFIG_${c}=|^# CONFIG_${c} is not set" \
-                .config || true
+          grep -E \
+          "^CONFIG_${c}=|^# CONFIG_${c} is not set" \
+          .config || true
 
-              exit 1
-            fi
+          exit 1
+          fi
 
-            echo "OK: CONFIG_${c}=y"
+          echo "OK: CONFIG_${c}=y"
           done
+
+          echo "=== Verify container configuration ==="
+
+          CONTAINER_MISSING=0
+
+          for c in \
+          NAMESPACES \
+          UTS_NS \
+          IPC_NS \
+          PID_NS \
+          NET_NS \
+          USER_NS \
+          SYSVIPC \
+          SYSVIPC_SYSCTL \
+          POSIX_MQUEUE \
+          DEVTMPFS \
+          DEVTMPFS_MOUNT \
+          CGROUPS \
+          CGROUP_SCHED \
+          CGROUP_PIDS \
+          CGROUP_FREEZER \
+          CGROUP_DEVICE \
+          CGROUP_CPUACCT \
+          MEMCG \
+          CPUSETS \
+          BLK_CGROUP \
+          CFS_BANDWIDTH \
+          FAIR_GROUP_SCHED \
+          SECCOMP \
+          SECCOMP_FILTER \
+          OVERLAY_FS \
+          TMPFS \
+          TMPFS_POSIX_ACL \
+          SHMEM \
+          VETH \
+          BRIDGE \
+          NETFILTER \
+          NF_CONNTRACK \
+          NF_NAT \
+          NETFILTER_XTABLES \
+          IP_NF_IPTABLES \
+          IP_NF_NAT \
+          IP_NF_TARGET_MASQUERADE \
+          IPV6 \
+          IP6_NF_IPTABLES \
+          IP6_NF_NAT \
+          IP6_NF_TARGET_MASQUERADE; do
+
+          if grep -qx "CONFIG_${c}=y" .config; then
+          echo "OK: CONFIG_${c}=y"
+          else
+          echo "WARN: CONFIG_${c} is not enabled after olddefconfig"
+          grep -E "^CONFIG_${c}=|^# CONFIG_${c} is not set" .config || true
+          CONTAINER_MISSING=$((CONTAINER_MISSING + 1))
+          fi
+          done
+
+          echo "=== Hard requirements for container runtime ==="
+
+          for c in NAMESPACES USER_NS PID_NS IPC_NS DEVTMPFS CGROUPS SECCOMP_FILTER OVERLAY_FS; do
+          if ! grep -qx "CONFIG_${c}=y" .config; then
+          echo "FATAL: CONFIG_${c} missing (container runtime cannot work)"
+          exit 1
+          fi
+          done
+
+          echo "Container hard requirements satisfied (soft warnings: ${CONTAINER_MISSING})"
 
           echo "=== Verify KPM configuration ==="
 
           if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-            grep -qx 'CONFIG_KPM=y' .config
-            echo "KPM requested and enabled"
+          grep -qx 'CONFIG_KPM=y' .config
+          echo "KPM requested and enabled"
           else
-            ! grep -qx 'CONFIG_KPM=y' .config
-            echo "KPM disabled by request"
+          ! grep -qx 'CONFIG_KPM=y' .config
+          echo "KPM disabled by request"
           fi
 
           echo "=== Verify SukiSU hook backend ==="
@@ -611,8 +707,8 @@ jobs:
           grep -qx 'CONFIG_KSU_SUSFS_INLINE_HOOK=y' .config
 
           if grep -qx 'CONFIG_KSU_KPROBES_KSUD=y' .config; then
-            echo "FATAL: KSU Kprobes backend unexpectedly enabled"
-            exit 1
+          echo "FATAL: KSU Kprobes backend unexpectedly enabled"
+          exit 1
           fi
 
           echo "SUSFS inline hook backend selected"
@@ -620,12 +716,13 @@ jobs:
           echo "=== Global KPROBES status ==="
 
           grep -E \
-            '^CONFIG_KPROBES=|^# CONFIG_KPROBES is not set' \
-            .config || true
+          '^CONFIG_KPROBES=|^# CONFIG_KPROBES is not set' \
+          .config || true
 
           echo "=== Kernel release ==="
 
           make -s kernelrelease
+
 
       # ==========================================
       # 9. Kernel compatibility
@@ -669,6 +766,12 @@ jobs:
             '^CONFIG_(KSU|KPM|KSU_SUSFS|KSU_SUSFS_INLINE_HOOK|KALLSYMS_ALL)=' \
             .config
 
+          echo "=== Container config snapshot ==="
+
+          grep -E \
+            '^CONFIG_(NAMESPACES|USER_NS|PID_NS|IPC_NS|NET_NS|DEVTMPFS|DEVTMPFS_MOUNT|CGROUPS|CGROUP_PIDS|CFS_BANDWIDTH|SECCOMP|SECCOMP_FILTER|OVERLAY_FS|VETH|BRIDGE|NF_NAT|IP6_NF_NAT)=' \
+            .config || true
+
       # ==========================================
       # 10. Install headers
       # ==========================================
@@ -688,13 +791,11 @@ jobs:
 
           echo "UAPI headers installed"
 
-      
       # ==========================================
-      # 11. Build kernel with KPM fallback
+      # 11. Build kernel Image
       # ==========================================
 
       - name: Build kernel Image
-        id: build_kernel
         working-directory: ${{ github.workspace }}/ws/common
         run: |
           set -uo pipefail
@@ -712,268 +813,64 @@ jobs:
           echo "CPU jobs: $JOBS"
           echo "KPM requested: ${{ inputs.enable_kpm }}"
 
-          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+          if make -j"$JOBS" Image; then
 
-            echo "=== Build with KPM ==="
+            echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
 
-            if make -j"$JOBS" Image \
-              2>&1 | tee "$RUNNER_TEMP/kernel-kpm.log"; then
-
-              grep -qx 'CONFIG_KPM=y' .config || {
-                echo "FATAL: KPM config disappeared"
-                exit 1
-              }
-
-              grep -Fq -- '-- KPM is enabled' \
-                "$RUNNER_TEMP/kernel-kpm.log" || {
-                echo "FATAL: SukiSU did not enable KPM compilation"
-                exit 1
-              }
-
-              echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
+            if grep -qx 'CONFIG_KPM=y' .config; then
               echo "KPM_STATUS=ENABLED" >> "$GITHUB_ENV"
-              echo "kpm_status=ENABLED" >> "$GITHUB_OUTPUT"
-
             else
-
-              echo "================================"
-              echo "KPM BUILD FAILED"
-              echo "RETRY WITHOUT KPM"
-              echo "================================"
-
-              echo "=== Remove KPM configuration ==="
-
-              sed -i \
-                -e '/^CONFIG_KPM=/d' \
-                -e '/^# CONFIG_KPM is not set$/d' \
-                .config
-
-              echo "# CONFIG_KPM is not set" >> .config
-
-              make olddefconfig
-
-              if grep -qx 'CONFIG_KPM=y' .config; then
-                echo "FATAL: KPM could not be disabled"
-                exit 1
-              fi
-
-              echo "=== Clean partial objects ==="
-
-              make clean
-
-              echo "=== Rebuild without KPM ==="
-
-              if ! make -j"$JOBS" Image \
-                2>&1 | tee "$RUNNER_TEMP/kernel-no-kpm.log"; then
-
-                echo "FATAL: kernel build failed without KPM"
-                exit 1
-              fi
-
-              echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
-              echo "KPM_STATUS=DISABLED_FALLBACK" >> "$GITHUB_ENV"
-              echo "kpm_status=ENABLED" >> "$GITHUB_OUTPUT"
-
+              echo "KPM_STATUS=DISABLED_BY_REQUEST" >> "$GITHUB_ENV"
             fi
 
           else
 
-            echo "=== KPM disabled by request ==="
+            echo "Initial kernel build failed"
 
-            ! grep -qx 'CONFIG_KPM=y' .config || {
-              echo "FATAL: unexpected KPM configuration"
+            if [ "${{ inputs.enable_kpm }}" != "true" ]; then
+              echo "FATAL: build failed without KPM"
               exit 1
-            }
+            fi
 
-            if ! make -j"$JOBS" Image \
-              2>&1 | tee "$RUNNER_TEMP/kernel-no-kpm.log"; then
+            echo "================================"
+            echo "RETRY WITHOUT KPM"
+            echo "================================"
 
-              echo "FATAL: kernel build failed"
+            sed -i \
+              -e '/^CONFIG_KPM=/d' \
+              -e '/^# CONFIG_KPM is not set$/d' \
+              .config
+
+            echo "# CONFIG_KPM is not set" >> .config
+
+            make olddefconfig
+
+            if grep -qx 'CONFIG_KPM=y' .config; then
+              echo "FATAL: KPM could not be disabled"
+              exit 1
+            fi
+
+            echo "=== Clean partial objects ==="
+
+            make clean
+
+            echo "=== Rebuild without KPM ==="
+
+            if ! make -j"$JOBS" Image; then
+              echo "FATAL: kernel build failed without KPM"
               exit 1
             fi
 
             echo "KERNEL_BUILD=SUCCESS" >> "$GITHUB_ENV"
-            echo "KPM_STATUS=DISABLED_BY_REQUEST" >> "$GITHUB_ENV"
-            echo "kpm_status=ENABLED" >> "$GITHUB_OUTPUT"
+            echo "KPM_STATUS=DISABLED_FALLBACK" >> "$GITHUB_ENV"
 
           fi
 
           test -s arch/arm64/boot/Image
-          test -s vmlinux
 
-          echo "=== Build result ==="
-
-          echo "KPM status: $(grep '^KPM_STATUS=' "$GITHUB_ENV" | tail -1)"
+          echo "=== Image size ==="
 
           ls -lh arch/arm64/boot/Image
-
-          
-      # ==========================================
-      # 11.5. Build KernelPatch KPM engine
-      # ==========================================
-
-      
-      - name: Build KernelPatch engine
-        if: ${{ steps.build_kernel.outputs.kpm_status == 'ENABLED' }}
-        run: |
-          set -euxo pipefail
-
-          KP="$GITHUB_WORKSPACE/ws/kernelpatch"
-          JOBS=$(nproc)
-
-          echo "================================"
-          echo "BUILD KPM ENGINE"
-          echo "================================"
-
-          echo "=== Fix ARM64 stack protector ==="
-
-          KP_MAKEFILE="$KP/kernel/Makefile"
-
-          python3 - "$KP_MAKEFILE" <<'PY'
-          import sys
-          from pathlib import Path
-
-          p = Path(sys.argv[1])
-          s = p.read_text()
-
-          old = "CFLAGS += -Wall -fno-builtin -std=gnu11 -nostdinc -mgeneral-regs-only -ffixed-x18"
-          new = old + " -fno-stack-protector -fno-pic -fno-PIE"
-          
-          if new in s:
-              print("Already fixed")
-          elif s.count(old) == 1:
-              p.write_text(s.replace(old, new))
-              print("Applied -fno-stack-protector")
-          else:
-              raise SystemExit(
-                  "FATAL: ARM64 CFLAGS pattern not found exactly once"
-              )
-          PY
-
-          grep -n '^CFLAGS +=' "$KP_MAKEFILE"
-
-          echo "=== Clean previous build ==="
-          make -C "$KP/kernel" clean TARGET_COMPILE=aarch64-linux-gnu-
-
-          echo "=== Build ARM64 kpimg ==="
-
-          make -C "$KP/kernel" \
-            -j"$JOBS" \
-            TARGET_COMPILE=aarch64-linux-gnu-
-
-          test -s "$KP/kernel/kpimg"
-
-          file "$KP/kernel/kpimg"
-
-          echo "=== Build Linux kptools ==="
-
-          make -C "$KP/tools" -j"$JOBS"
-
-          test -s "$KP/tools/kptools"
-
-          file "$KP/tools/kptools"
-
-          echo "=== Prepare patch resources ==="
-
-          mkdir -p "$KP/patch/res"
-
-          cp "$KP/kernel/kpimg" \
-            "$KP/patch/res/kpimg"
-
-          cp "$KP/tools/kptools" \
-            "$KP/patch/res/kptools-linux"
-
-          # Linux host patcher does not use the Android binary.
-          # main.cpp nevertheless includes its generated header.
-
-          printf '\001' \
-            > "$KP/patch/res/kptools-android"
-
-          echo "=== Build Linux patcher ==="
-
-          make -C "$KP/patch" clean
-
-          git -C "$KP" checkout -- patch/include/header.h
-
-          make -C "$KP/patch" -j"$JOBS"
-          
-          test -s "$KP/patch/patch"
-
-          echo "=== Verify generated resources ==="
-
-          test -s "$KP/patch/include/kpimg_enc.h"
-          test -s "$KP/patch/include/kptools_linux.h"
-          test -s "$KP/patch/include/kptools_android.h"
-
-          echo "=== Verify patcher ==="
-
-          file "$KP/patch/patch"
-
-          echo "=== KernelPatch build information ==="
-
-          git -C "$KP" rev-parse HEAD
-
-          echo "KPM engine build completed"
-
-          
-      # ==========================================
-      # 11.6. Inject KernelPatch into kernel Image
-      # ==========================================
-
-      - name: Inject KernelPatch into Image
-        if: ${{ steps.build_kernel.outputs.kpm_status == 'ENABLED' }}
-        working-directory: ${{ github.workspace }}/ws/common
-        run: |
-          set -euxo pipefail
-
-          BOOT=arch/arm64/boot
-          PATCH="$GITHUB_WORKSPACE/ws/kernelpatch/patch/patch"
-
-          echo "================================"
-          echo "KPM IMAGE INJECTION"
-          echo "================================"
-
-          test -s "$BOOT/Image"
-          test -s "$PATCH"
-
-          cd "$BOOT"
-
-          echo "=== Preserve original Image ==="
-
-          cp Image Image.unpatched
-
-          rm -f oImage Image.kpm
-
-          echo "=== Execute KernelPatch patcher ==="
-
-          "$PATCH"
-
-          echo "=== Verify patched Image ==="
-
-          if [ ! -s oImage ]; then
-            echo "FATAL: KernelPatch failed to generate oImage"
-            exit 1
-          fi
-
-          mv oImage Image.kpm
-
-          test -s Image.kpm
-
-          echo "=== Compare image sizes ==="
-
-          ls -lh Image.unpatched Image.kpm
-
-          echo "=== SHA256 ==="
-
-          sha256sum Image.unpatched Image.kpm
-
-          echo "=== Image identification ==="
-
-          file Image.kpm
-
-          echo "KPM image injection completed"
-
-
 
       # ==========================================
       # 12. Verify kernel features
@@ -1001,7 +898,7 @@ jobs:
 
           make -s kernelrelease
 
-          echo "=== Required configurations ==="
+          echo "=== Required base configurations ==="
 
           for c in \
             64BIT \
@@ -1034,26 +931,22 @@ jobs:
             echo "OK: $c"
           done
 
-                    echo "=== KPM verification ==="
+          echo "=== Container runtime requirements ==="
 
-          if [ "$KPM_STATUS" = "ENABLED" ]; then
-            echo "KPM build status: ENABLED"
-            grep -qx 'CONFIG_KPM=y' .config
-
-            test -s arch/arm64/boot/Image.kpm
-
-            echo "KPM injected Image:"
-            ls -lh arch/arm64/boot/Image.kpm
-
-            sha256sum arch/arm64/boot/Image.kpm
-
-          else
-            echo "KPM build status: $KPM_STATUS"
-
-            if grep -qx 'CONFIG_KPM=y' .config; then
-              echo "FATAL: KPM config is enabled but build status is not ENABLED"
-              exit 1
+          for c in NAMESPACES USER_NS PID_NS IPC_NS NET_NS DEVTMPFS DEVTMPFS_MOUNT CGROUPS CGROUP_PIDS CFS_BANDWIDTH SECCOMP SECCOMP_FILTER OVERLAY_FS VETH BRIDGE NF_NAT IPV6 IP6_NF_NAT; do
+            if grep -qx "CONFIG_${c}=y" .config; then
+              echo "OK: CONFIG_${c}=y"
+            else
+              echo "WARN: CONFIG_${c} missing"
             fi
+          done
+
+          echo "=== KPM status ==="
+
+          if grep -qx 'CONFIG_KPM=y' .config; then
+            echo "KPM ENABLED"
+          else
+            echo "KPM DISABLED"
           fi
 
           echo "=== SUSFS object ==="
@@ -1068,7 +961,6 @@ jobs:
             \( -name '*.o' -o -name 'built-in.a' \) \
             -size +0c -print
 
-          echo "=== SukiSU artifact inspection completed ==="
           echo "=== Native AVC implementation ==="
 
           grep -q \
@@ -1147,6 +1039,14 @@ jobs:
             echo "Date UTC: $(date -u)"
             echo ""
 
+            echo "=== Container runtime configuration ==="
+
+            grep -E \
+              '^CONFIG_(NAMESPACES|UTS_NS|IPC_NS|PID_NS|NET_NS|USER_NS|SYSVIPC|POSIX_MQUEUE|DEVTMPFS|DEVTMPFS_MOUNT|CGROUPS|CGROUP_SCHED|CGROUP_PIDS|CGROUP_FREEZER|CGROUP_DEVICE|MEMCG|CPUSETS|CFS_BANDWIDTH|FAIR_GROUP_SCHED|SECCOMP|SECCOMP_FILTER|OVERLAY_FS|TMPFS|SHMEM|VETH|BRIDGE|NF_CONNTRACK|NF_NAT|NETFILTER_XTABLES|IP_NF_NAT|IP_NF_TARGET_MASQUERADE|IPV6|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE)=' \
+              ws/common/.config || true
+
+            echo ""
+
             echo "=== Kernel configuration ==="
 
             grep -E \
@@ -1176,12 +1076,8 @@ jobs:
             https://github.com/osm0sis/AnyKernel3 \
             ak3
 
-          if [ "$KPM_STATUS" = "ENABLED" ] && [ -s ws/common/arch/arm64/boot/Image.kpm ]; then
-            cp ws/common/arch/arm64/boot/Image.kpm ak3/Image
-          else
-            cp ws/common/arch/arm64/boot/Image ak3/Image
-          fi
-          
+          cp ws/common/arch/arm64/boot/Image ak3/Image
+
           cd ak3
 
           echo "=== Device identification ==="
@@ -1217,6 +1113,13 @@ jobs:
           sed -i \
             's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' \
             anykernel.sh
+
+          echo "=== Drop cgroup_disable from cmdline if present ==="
+
+          if grep -q 'cgroup_disable' anykernel.sh; then
+            sed -i -E 's/cgroup_disable=[a-z,]+[ ]?//g' anykernel.sh
+            grep -n 'cgroup_disable' anykernel.sh || true
+          fi
 
           echo "=== Remove repository metadata ==="
 
