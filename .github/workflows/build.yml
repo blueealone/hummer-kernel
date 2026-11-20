@@ -403,6 +403,69 @@ jobs:
 
           echo "Native AVC Spoofing implementation verified"
 
+          
+      # ==========================================
+      # 8. Lock SELinux to permissive
+      # ==========================================
+
+      - name: Lock SELinux to permissive
+        working-directory: ${{ github.workspace }}/ws/common
+        run: |
+          set -euxo pipefail
+
+          FILE=security/selinux/selinuxfs.c
+          test -s "$FILE"
+
+          echo "=== Before patch ==="
+
+          test "$(grep -c 'new_value = !!scan_value;' "$FILE")" = "1"
+          grep -n 'new_value = !!scan_value;' "$FILE"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("security/selinux/selinuxfs.c")
+          s = p.read_text()
+
+          anchor = "\tnew_value = !!scan_value;\n"
+
+          if s.count(anchor) != 1:
+              raise SystemExit("FATAL: anchor count = %d" % s.count(anchor))
+
+          inject = anchor + (
+              "\n"
+              "\t/*\n"
+              "\t * Local hardening: never allow a runtime switch into enforcing mode.\n"
+              "\t * Return count (pretend success) instead of -EPERM so that a stock\n"
+              "\t * init which calls setenforce(1) will not PLOG(FATAL) and hang boot.\n"
+              "\t * The kernel state simply stays permissive.\n"
+              "\t */\n"
+              "\tif (new_value) {\n"
+              "\t\tpr_info(\"SELinux: runtime switch to enforcing blocked\\n\");\n"
+              "\t\tlength = count;\n"
+              "\t\tgoto out;\n"
+              "\t}\n"
+          )
+
+          if "runtime switch to enforcing blocked" not in s:
+              s = s.replace(anchor, inject, 1)
+
+          p.write_text(s)
+          PY
+
+          echo "=== After patch ==="
+
+          grep -n -A12 'Local hardening: never allow' "$FILE"
+
+          test "$(grep -c 'runtime switch to enforcing blocked' "$FILE")" = "1"
+
+          echo "=== enclosing function ==="
+
+          awk '/static ssize_t sel_write_enforce/,/^#else/' "$FILE" \
+            | grep -E 'new_value = !!|runtime switch|length = count|goto out|enforcing_set|^out:'
+
+          echo "SELinux permissive lock applied"
+
 
       # ==========================================
       # 8. Configure kernel
