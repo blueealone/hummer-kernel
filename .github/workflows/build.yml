@@ -437,7 +437,7 @@ jobs:
           # appended "=y" is the single definition for that symbol.
           # Every other line in device.config is left untouched.
 
-          FLIP_KEYS="DEVTMPFS SECURITY_SELINUX_DEVELOP"
+          FLIP_KEYS="DEVTMPFS SECURITY_SELINUX_DEVELOP SECURITY_SELINUX_BOOTPARAM"
 
           FLIPPED=0
           for k in $FLIP_KEYS; do
@@ -467,6 +467,7 @@ jobs:
           CONFIG_SECURITY_SELINUX=y
           # DEVELOP=y only allows runtime setenforce 0/1; boot default stays enforcing.
           CONFIG_SECURITY_SELINUX_DEVELOP=y
+          CONFIG_SECURITY_SELINUX_BOOTPARAM=y
           CONFIG_EXT4_FS=y
 
           # Debugging and symbols
@@ -566,7 +567,7 @@ jobs:
           SURVIVED=0
           DROPPED=0
           # Only the keys this build actually appends.
-          for c in 64BIT ARM64 SECURITY SECURITY_SELINUX SECURITY_SELINUX_DEVELOP EXT4_FS DEBUG_KERNEL KALLSYMS KALLSYMS_ALL DEVTMPFS; do
+          for c in 64BIT ARM64 SECURITY SECURITY_SELINUX SECURITY_SELINUX_DEVELOP SECURITY_SELINUX_BOOTPARAM EXT4_FS DEBUG_KERNEL KALLSYMS KALLSYMS_ALL DEVTMPFS; do
             if grep -qx "CONFIG_${c}=y" .config; then
               SURVIVED=$((SURVIVED + 1))
             else
